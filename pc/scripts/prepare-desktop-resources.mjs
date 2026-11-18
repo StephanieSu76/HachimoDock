@@ -375,7 +375,7 @@ function validateBundledP4Firmware(target, firmwareName, expectedMin, expectedMa
   const projectName = readNullTerminatedUtf8(firmware.subarray(descriptorOffset + 48, descriptorOffset + 80));
   const cmake = readFileSync(p4ProjectCmake, "utf8");
   const sourceVersion = cmake.match(/set\(PROJECT_VER\s+"([^"]+)"\)/)?.[1] || "";
-  const expectedVersion = sourceVersion;
+  const expectedVersion = sourceVersion && `${sourceVersion}-${firmwareName.includes("-pico-") ? "pico" : "wifi6"}`;
   if (projectName !== "pet_manager_p4_runtime") {
     throw new Error(`PC 内置固件 projectName 异常：${projectName || "(empty)"}`);
   }
@@ -410,6 +410,11 @@ if (builtinsCheck.status !== 0) throw new Error('Built-in local-delights resourc
 // Python validation may leave bytecode containing absolute build-machine paths.
 cleanSkillBytecode(join(repositoryRoot, "pc", "skills", "petui"));
 const targetArch = requestedArch(target, process.platform, process.arch);
+const authoring = spawnSync(process.execPath,
+  [join(scriptDir, "prepare-petui-runtime.mjs"), `${target}-${targetArch}`, join(tauriRoot, "authoring-runtime-bundle")],
+  { stdio: "inherit" });
+if (authoring.status !== 0) throw new Error("无法准备 PetUI 创作工具链");
+
 // Validate historical non-P4 voice resources only when explicitly supplied; P4 uses native ASR.
 const voiceRuntime = prepareVoiceRuntime({tauriRoot,target,arch:targetArch});
 if(voiceRuntime.enabled)console.log("Explicit legacy voice bundle requires --config src-tauri/tauri.voice-legacy.conf.json");
@@ -417,6 +422,8 @@ const runtimeName = target === "windows" ? "node.exe" : "node";
 const targetRuntime = join(generatedRuntime, runtimeName);
 const p4Firmware = validateBundledP4Firmware(target, "firmware.bin", 1, 199);
 validateBundledP4Firmware(target, "firmware-v3.bin", 300, 399);
+validateBundledP4Firmware(target, "firmware-pico-v1.bin", 1, 199);
+validateBundledP4Firmware(target, "firmware-pico-v3.bin", 300, 399);
 let sourceRuntime = process.env.PET_MANAGER_NODE_BIN
   ? resolve(process.env.PET_MANAGER_NODE_BIN)
   : process.execPath;

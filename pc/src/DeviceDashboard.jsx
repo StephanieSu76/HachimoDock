@@ -26,7 +26,8 @@
  *          MiMoCode-only macOS final-text delivery plus Return at the captured current caret,
  *          app-shell/native-operation-owned macOS Accessibility consent,
  *          shared first-visit onboarding state with a reopenable page guide,
- *          an ESP32-P4 A/B firmware update entry, shared current-key instructions,
+ *          an ESP32-P4 A/B firmware update entry, bound USB capability diagnostics,
+ *          shared current-key instructions,
  *          a persona editor preserved while visiting API settings,
  *          and compact volume/city controls below voice input with retained city drafts.
  * [Pos] component node in pc/src
@@ -35,6 +36,7 @@
 
 import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { RefreshCw } from "lucide-react";
 import DeviceGuideModal from "./DeviceGuideModal.jsx";
 import {
@@ -46,14 +48,13 @@ import Card from "./shell/Card.jsx";
 import Button from "./shell/Button.jsx";
 import { useDeviceContext } from "./shell/DeviceContext.jsx";
 import { buildUsageHelp } from "./lib/usage-help.js";
+import { decodeBluetoothShortcut } from "./lib/bluetooth-shortcut.js";
 import PersonaVoiceModal from "./PersonaVoiceModal.jsx";
 import { useToast } from "./shell/ToastStack.jsx";
 import DeviceStatusBar from "./dashboard/DeviceStatusBar.jsx";
-import DeviceVolumePanel from "./dashboard/DeviceVolumePanel.jsx";
-import SharedLocationPanel from "./dashboard/SharedLocationPanel.jsx";
-import { createSharedLocationController } from "./dashboard/shared-location-model.js";
 import { useExitProtection } from "./lib/exit-protection.js";
 import ChannelMatrixCard from "./dashboard/ChannelMatrixCard.jsx";
+import KeyboardConfiguration from "./dashboard/KeyboardConfiguration.jsx";
 import BoardButtonPanel from "./dashboard/BoardButtonPanel.jsx";
 import VoiceAssistantPanel, { buildVoiceSummary, formatVoiceSessionOption } from "./dashboard/VoiceAssistantPanel.jsx";
 import {voiceRuntimeTarget,createVoiceRuntimePoller} from "./dashboard/voice-runtime-target.js";
@@ -110,7 +111,7 @@ export const DEFAULT_BUTTON_ACTIONS = {
   p4_sw2_short: "component_center",
   p4_sw2_long: "realtime_chat",
   p4_sw3_short: "page_back",
-  p4_sw3_long: "disabled",
+  p4_sw3_long: "system_settings",
   p4_encoder_press: "page_enter",
   p4_encoder_long: "disabled",
   p4_encoder_cw: "session_next",
@@ -127,8 +128,15 @@ export const P4_VOICE_BUTTON_OPTIONS = [
 ];
 export const VOICE_BUTTON_OPTIONS = P4_VOICE_BUTTON_OPTIONS;
 
+export const VOICE_KEY_PRESETS = [
+  { id: "win-ctrl", label: "Windows · Ctrl + Win（微信输入法）" },
+  { id: "win-h", label: "Windows · Win + H（系统语音输入）" },
+  { id: "mac-ctrl-alt-d", label: "macOS · Control + Option + D（先在系统听写设置绑定）" },
+];
+
 export const BUTTON_FUNCTION_OPTIONS = [
   { id: "agent_prompt", label: "发送自定义指令", detail: "按下对应手势后，将该按钮下方填写的指令直接发送给当前 Code Agent。" },
+  { id: "voice_key_forward", label: "触发电脑语音输入", detail: "在宠物首页按键触发电脑听写。用 USB-C 串口时请保持 Pet Manager 在后台，macOS 需授予辅助功能权限。" },
   { id: "voice_ptt", label: "语音输入", detail: "绑定到长按：按住说话，松开追加到输入框，确认后发送。" },
   { id: "realtime_chat", label: "实时对话", detail: "在宠物界面触发后开始聊天，再次触发结束。组件运行时请先返回宠物界面。" },
   { id: "session_previous", label: "上一个", detail: "宠物界面切换到上一个会话气泡；组件中心切换到上一个组件。" },
@@ -136,6 +144,7 @@ export const BUTTON_FUNCTION_OPTIONS = [
   { id: "session_clear", label: "清空主页会话", detail: "清除设备主页当前显示的全部会话；新会话或新活动会自动重新显示。" },
   { id: "dsh_interrupt", label: "打断 DSH 当前任务", detail: "仅在跟随 DeepSeek Harness 时可用：取消当前正在执行的回合。" },
   { id: "component_center", label: "切换宠物/组件", detail: "切换宠物界面和组件列表；组件运行时请先返回。" },
+  { id: "system_settings", label: "打开系统设置", detail: "从宠物首页或组件列表打开设备设置。" },
   { id: "page_enter", label: "确认", detail: "发送语音输入的文字，或打开选中的组件；组件内按其玩法操作。" },
   { id: "page_back", label: "返回（取消）", detail: "取消当前选择，或从当前组件返回上一级。" },
   { id: "disabled", label: "不绑定", detail: "不为这个操作分配功能。" },
@@ -170,23 +179,27 @@ const P4_CUSTOM_ACTION_OPTIONS = [
   "session_clear",
   "dsh_interrupt",
   "component_center",
+  "system_settings",
   "page_enter",
   "page_back",
   "disabled",
 ];
 export const P4_BUTTON_CONTROL_ROWS = [
-  { id: "p4_sw1_short", controlId: "p4_sw1", label: "SW1 短按", event: "button.sw1.short_press", defaultAction: "page_enter", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
-  { id: "p4_sw1_long", controlId: "p4_sw1", label: "SW1 长按", event: "button.sw1.long_press", holdEvent: "button.sw1.hold", voiceTriggerId: P4_DEFAULT_VOICE_TRIGGER, defaultAction: "voice_ptt", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
-  { id: "p4_sw2_short", controlId: "p4_sw2", label: "SW2 短按", event: "button.sw2.short_press", defaultAction: "component_center", defaultValue: P4_DEFAULT_PROMPT, actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
-  { id: "p4_sw2_long", controlId: "p4_sw2", label: "SW2 长按", event: "button.sw2.long_press", holdEvent: "button.sw2.hold", voiceTriggerId: "sw2.hold", defaultAction: "realtime_chat", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
-  { id: "p4_sw3_short", controlId: "p4_sw3", label: "SW3 短按", event: "button.sw3.short_press", defaultAction: "page_back", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
-  { id: "p4_sw3_long", controlId: "p4_sw3", label: "SW3 长按", event: "button.sw3.long_press", holdEvent: "button.sw3.hold", voiceTriggerId: "sw3.hold", defaultAction: "disabled", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
+  { id: "p4_sw1_short", controlId: "p4_sw1", label: "SW1 短按", event: "button.sw1.short_press", defaultAction: "page_enter", actionOptions: [...P4_CUSTOM_ACTION_OPTIONS, "voice_key_forward"], supportsValue: true },
+  { id: "p4_sw1_double", controlId: "p4_sw1", label: "SW1 双击", event: "button.sw1.double_press", defaultAction: "disabled", actionOptions: [...P4_CUSTOM_ACTION_OPTIONS, "voice_key_forward"], supportsValue: true },
+  { id: "p4_sw1_long", controlId: "p4_sw1", label: "SW1 长按", event: "button.sw1.long_press", holdEvent: "button.sw1.hold", voiceTriggerId: P4_DEFAULT_VOICE_TRIGGER, defaultAction: "voice_ptt", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS, "voice_key_forward"], supportsValue: true },
+  { id: "p4_sw2_short", controlId: "p4_sw2", label: "SW2 短按", event: "button.sw2.short_press", defaultAction: "component_center", defaultValue: P4_DEFAULT_PROMPT, actionOptions: [...P4_CUSTOM_ACTION_OPTIONS, "voice_key_forward"], supportsValue: true },
+  { id: "p4_sw2_double", controlId: "p4_sw2", label: "SW2 双击", event: "button.sw2.double_press", defaultAction: "disabled", actionOptions: [...P4_CUSTOM_ACTION_OPTIONS, "voice_key_forward"], supportsValue: true },
+  { id: "p4_sw2_long", controlId: "p4_sw2", label: "SW2 长按", event: "button.sw2.long_press", holdEvent: "button.sw2.hold", voiceTriggerId: "sw2.hold", defaultAction: "realtime_chat", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS, "voice_key_forward"], supportsValue: true },
+  { id: "p4_sw3_short", controlId: "p4_sw3", label: "SW3 短按", event: "button.sw3.short_press", defaultAction: "page_back", actionOptions: [...P4_CUSTOM_ACTION_OPTIONS, "voice_key_forward"], supportsValue: true },
+  { id: "p4_sw3_double", controlId: "p4_sw3", label: "SW3 双击", event: "button.sw3.double_press", defaultAction: "disabled", actionOptions: [...P4_CUSTOM_ACTION_OPTIONS, "voice_key_forward"], supportsValue: true },
+  { id: "p4_sw3_long", controlId: "p4_sw3", label: "SW3 长按", event: "button.sw3.long_press", holdEvent: "button.sw3.hold", voiceTriggerId: "sw3.hold", defaultAction: "system_settings", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS, "voice_key_forward"], supportsValue: true },
   { id: "p4_joystick_up", controlId: "p4_joystick", label: "摇杆向上", event: "joystick.up", defaultAction: "session_previous", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
   { id: "p4_joystick_down", controlId: "p4_joystick", label: "摇杆向下", event: "joystick.down", defaultAction: "session_next", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
   { id: "p4_encoder_ccw", controlId: "p4_joystick", label: "摇杆向左", event: "knob.rotate_ccw", defaultAction: "session_previous", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
   { id: "p4_encoder_cw", controlId: "p4_joystick", label: "摇杆向右", event: "knob.rotate_cw", defaultAction: "session_next", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
   { id: "p4_encoder_press", controlId: "p4_joystick", label: "摇杆中按短按", event: "button.encoder.short_press", defaultAction: "page_enter", actionOptions: P4_CUSTOM_ACTION_OPTIONS, supportsValue: true },
-  { id: "p4_encoder_long", controlId: "p4_joystick", label: "摇杆中按长按", event: "button.encoder.long_press", holdEvent: "button.encoder.hold", voiceTriggerId: "encoder_button.hold", defaultAction: "disabled", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS], supportsValue: true },
+  { id: "p4_encoder_long", controlId: "p4_joystick", label: "摇杆中按长按", event: "button.encoder.long_press", holdEvent: "button.encoder.hold", voiceTriggerId: "encoder_button.hold", defaultAction: "disabled", voiceFallbackAction: "disabled", actionOptions: ["voice_ptt", ...P4_CUSTOM_ACTION_OPTIONS, "voice_key_forward"], supportsValue: true },
 ];
 
 const LEGACY_P4_DEFAULT_BUTTON_ACTIONS = {
@@ -342,6 +355,11 @@ export function buildBoardButtonConfigBindings(buttonActions = {}, buttonValues 
       ? normalizedButtonActions[row.id]
       : row.defaultAction;
     const binding = { event: row.otaEvent || row.event, action };
+    if (action === "voice_key_forward") {
+      binding.value = (VOICE_KEY_PRESETS.some(preset => preset.id === buttonValues[row.id])
+        || decodeBluetoothShortcut(buttonValues[row.id]))
+        ? buttonValues[row.id] : "win-ctrl";
+    }
     if (action === "agent_prompt" || action === "miniapp_action") {
       binding.value = clampButtonActionValue(buttonValues[row.id] || row.defaultValue || "");
     }
@@ -547,11 +565,21 @@ function comparableButtonConfig(value = {}, runtime = "") {
   };
 }
 
-export function boardButtonConfigMatchesClient(clientConfig = {}, response = {}, runtime = "") {
+export function boardButtonConfigMatchesClient(clientConfig = {}, response = {}, runtime = "", capabilities = null) {
   const boardConfig = mergeBoardButtonConfig(clientConfig, response, runtime);
   if (boardConfig.boardDefaultsMigrated === true) return false;
-  return JSON.stringify(comparableButtonConfig(clientConfig, runtime))
-    === JSON.stringify(comparableButtonConfig(boardConfig, runtime));
+  const client = comparableButtonConfig(clientConfig, runtime);
+  const board = comparableButtonConfig(boardConfig, runtime);
+  if (capabilities) {
+    const deferred = new Set(client.bindings.filter(deferredButtonBindings(capabilities)).map(binding => binding.event));
+    client.bindings = client.bindings.filter(binding => !deferred.has(binding.event));
+    board.bindings = board.bindings.filter(binding => !deferred.has(binding.event));
+  }
+  const actual = response?.config?.bindings ?? response?.bindings ?? [];
+  if (!client.bindings.filter(binding => binding.action === "system_settings").every(binding =>
+    Array.isArray(actual) && actual.some(entry => entry?.event === binding.event && entry.action === binding.action)
+  )) return false;
+  return JSON.stringify(client) === JSON.stringify(board);
 }
 
 export function applyVoiceEnabledForRuntime(value = {}, enabled = false, runtime = "") {
@@ -608,7 +636,7 @@ export function applyVoiceTriggerForRuntime(value = {}, trigger = "", runtime = 
   return next;
 }
 
-function loadVoiceConfigFromStorage() {
+export function loadVoiceConfigFromStorage() {
   try {
     const raw = localStorage.getItem(VOICE_CONFIG_STORAGE_KEY);
     if (raw) return normalizeVoiceConfig(JSON.parse(raw));
@@ -616,7 +644,7 @@ function loadVoiceConfigFromStorage() {
   return normalizeVoiceConfig({});
 }
 
-function saveVoiceConfigToStorage(next) {
+export function saveVoiceConfigToStorage(next) {
   try {
     localStorage.setItem(VOICE_CONFIG_STORAGE_KEY, JSON.stringify(normalizeVoiceConfig(next)));
   } catch {}
@@ -625,19 +653,43 @@ function saveVoiceConfigToStorage(next) {
 // Single place that OTAs a button config to the board. Used by both the device
 // dashboard's manual "下发" button and the component center's install flow, so
 // the invoke shape lives in exactly one spot.
-export async function dispatchBoardButtonConfig({ boardDeviceId, buttonActions, buttonValues, runtime, voiceButton, voiceEnabled }) {
+function buttonConfigForDevice(config, supportsVoiceKey, supportsCustomBluetoothKey) {
+  const values = Object.values(config.buttonActions);
+  if ((supportsVoiceKey || !values.includes("voice_key_forward"))
+      && (supportsCustomBluetoothKey || !Object.values(config.buttonValues).some(decodeBluetoothShortcut))) return config;
+  const buttonActions = { ...config.buttonActions };
+  for (const row of P4_BUTTON_CONTROL_ROWS) {
+    if (buttonActions[row.id] === "voice_key_forward"
+        && (!supportsVoiceKey || (!supportsCustomBluetoothKey && decodeBluetoothShortcut(config.buttonValues[row.id])))) {
+      buttonActions[row.id] = "disabled";
+    }
+  }
+  return { ...config, buttonActions };
+}
+
+function deferredButtonBindings(capabilities = {}) {
+  return ({ event, action }) =>
+    (action === "system_settings" && capabilities.systemSettings !== true) ||
+    (event.endsWith(".double_press") && capabilities.inputDoublePress !== true);
+}
+
+const SETTINGS_NOT_READY = "设备暂未开放系统设置，所选按键动作已保留在电脑上。";
+
+export async function dispatchBoardButtonConfig({ boardDeviceId, buttonActions, buttonValues, runtime, voiceButton, voiceEnabled, capabilities, expectedConnectionId }) {
   const requestId = createButtonConfigRequestId();
   return invoke("button_config_signal", {
     boardDeviceId,
     requestId,
-    bindings: buildBoardButtonConfigBindings(buttonActions, buttonValues, runtime, voiceEnabled),
+    expectedConnectionId,
+    bindings: buildBoardButtonConfigBindings(buttonActions, buttonValues, runtime, voiceEnabled)
+      .filter(binding => !deferredButtonBindings(capabilities)(binding)
+        && !(binding.event.endsWith(".double_press") && binding.action === "disabled")),
     voiceButton,
     voiceEnabled,
   });
 }
 
 // ---------- Voice-bus helpers ----------
-const BRIDGE_HTTP_PRIMARY_PORT = 23333;
 
 function normalizeText(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -646,46 +698,9 @@ function normalizeText(value) {
 async function postMockButtonInject(payload) {
   await ensureBridgeRuntime().catch(() => {});
 
-  const ports = [];
-  try {
-    const runtime = await invoke("load_bridge_runtime_status");
-    const runtimePort = Number(runtime?.port);
-    if (Number.isFinite(runtimePort) && runtimePort > 0) ports.push(runtimePort);
-  } catch {
-    // Older desktop runtimes do not expose this command; use the managed bridge port below.
-  }
-  ports.push(BRIDGE_HTTP_PRIMARY_PORT);
-
-  let lastError = null;
-  for (const port of [...new Set(ports)]) {
-    try {
-      const url = `http://127.0.0.1:${port}/mock-button-inject`;
-      const result = await invoke("http_request_text", {
-        url,
-        method: "POST",
-        headersJson: JSON.stringify({
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        }),
-        body: JSON.stringify(payload),
-        timeoutMs: 120000,
-      });
-      const parsed = (() => {
-        try {
-          return JSON.parse(result?.body || "{}");
-        } catch {
-          return {};
-        }
-      })();
-      if (!result?.ok || parsed?.ok === false) {
-        throw new Error(parsed?.error || `mock-button-inject http ${result?.status || 0}`);
-      }
-      return parsed;
-    } catch (err) {
-      lastError = err;
-    }
-  }
-  throw lastError || new Error("mock-button-inject unavailable");
+  const result = await invoke("local_bridge_request", { route: "/mock-button-inject", body: payload });
+  if (result?.ok === false) throw new Error("Agent request failed; not resent");
+  return result;
 }
 
 // ---------- Voice reducer (lean — only what VoiceAssistantPanel needs) ----------
@@ -761,12 +776,8 @@ function voiceReducer(state, action) {
 
 // ---------- Component ----------
 
-export default function DeviceDashboard({ active = true, binding, onUnbind, onOpenApiSettings, onOpenGallery }) {
+export default function DeviceDashboard({ active = true, keyboardActive = false, binding, onUnbind, onOpenApiSettings, onOpenGallery, onOpenDeviceSettings }) {
   const [editingPersona, setEditingPersona] = useState(null);
-  const locationController = useMemo(() => createSharedLocationController({ invoke }), []);
-  const locationState = useSyncExternalStore(locationController.subscribe, locationController.getSnapshot, locationController.getSnapshot);
-  useExitProtection(locationState.saving ? "位置设置正在保存" : locationState.dirty ? "位置设置有未保存的修改" : "");
-  useEffect(() => () => locationController.setActive(false), [locationController]);
   // Native signaling now runs off the UI thread. Keep start/stop ordering
   // across auto-rearm, button configuration and manual toggles.
   const audioSignalQueueRef = useRef(Promise.resolve());
@@ -779,7 +790,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
   }, []);
   const {
     usb,
-    deviceOnline,
+    wifi,
     onlineBoardDeviceId,
     currentDisplay,
     agentScan,
@@ -790,6 +801,17 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
   } = useDeviceContext();
   const selectedAgentId = currentDisplay.agentId;
   const { push } = useToast();
+  useEffect(() => {
+    let active = true;
+    const subscription = listen("usb-voice-shortcut-result", ({ payload }) => {
+      if (!active || payload?.ok !== false || payload.boardDeviceId !== usb.boardDeviceId) return;
+      push({ tone: "error", title: "语音快捷键发送失败", message: payload.message });
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+      subscription.then(unlisten => unlisten?.());
+    };
+  }, [push, usb.boardDeviceId]);
 
   const [voiceState, voiceDispatch] = useReducer(voiceReducer, VOICE_INITIAL_STATE);
   const onDeviceVoiceAudioActivity = useCallback((activity) => {
@@ -900,12 +922,18 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
       tone: "",
       message: "正在校验设备与客户端按钮配置...",
     });
-    const clientConfig = normalizeVoiceConfig(voiceConfigRef.current);
+    const clientConfig = buttonConfigForDevice(normalizeVoiceConfig(voiceConfigRef.current),
+      usb.capabilities?.nativeUsbHid === "p4-hid-keyboard-v1",
+      usb.capabilities?.bluetoothShortcutKeys === "hid-usage-v1");
+    const settingsPending = usb.capabilities?.systemSettings !== true
+      && isP4Runtime && Object.values(clientConfig.buttonActions).includes("system_settings");
     const syncClientConfig = async () => {
       if (!queryIsCurrent()) return null;
       const resolved = resolveButtonConfigForRuntime(clientConfig, usb.runtime);
       return dispatchBoardButtonConfig({
         boardDeviceId: buttonConfigTargetBoardDeviceId,
+        capabilities: usb.capabilities,
+        expectedConnectionId: isP4Runtime ? usb.connectionId : undefined,
         buttonActions: resolved.config.buttonActions,
         buttonValues: resolved.config.buttonValues,
         runtime: usb.runtime,
@@ -918,12 +946,12 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
         expectedBoardDeviceId: buttonConfigTargetBoardDeviceId,
       });
       if (!queryIsCurrent()) return null;
-      if (boardButtonConfigMatchesClient(clientConfig, boardConfig, usb.runtime)) {
+      if (boardButtonConfigMatchesClient(clientConfig, boardConfig, usb.runtime, usb.capabilities || {})) {
         setVoiceConfigDirty(false);
         setVoiceConfigOtaState({
           pending: false,
-          tone: "success",
-          message: "设备按钮配置与客户端一致。",
+          tone: settingsPending ? "warning" : "success",
+          message: settingsPending ? SETTINGS_NOT_READY : "设备按钮配置与客户端一致。",
         });
         return boardConfig;
       }
@@ -936,12 +964,20 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
       });
       try {
         await syncClientConfig();
+        if (!queryIsCurrent()) return null;
+        const readback = await invoke("usb_get_button_config", {
+          expectedBoardDeviceId: buttonConfigTargetBoardDeviceId,
+        });
+        if (queryIsCurrent() &&
+            !boardButtonConfigMatchesClient(clientConfig, readback, usb.runtime, usb.capabilities || {})) {
+          throw new Error("设备回读的按键配置与本次下发不一致");
+        }
         if (queryIsCurrent()) {
           setVoiceConfigDirty(false);
           setVoiceConfigOtaState({
             pending: false,
-            tone: "success",
-            message: "检测到配置差异，已使用客户端按钮配置覆盖设备。",
+            tone: settingsPending ? "warning" : "success",
+            message: settingsPending ? SETTINGS_NOT_READY : "已同步并核对设备按钮配置。",
           });
         }
       } catch (syncError) {
@@ -972,6 +1008,11 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
   }, [
     buttonConfigTargetBoardDeviceId,
     hasKnownRuntime,
+    isP4Runtime,
+    usb.capabilities?.inputDoublePress,
+    usb.capabilities?.bluetoothShortcutKeys,
+    usb.capabilities?.systemSettings,
+    usb.capabilities?.nativeUsbHid,
     usb.connected,
     usb.runtime,
     voiceTarget.key,
@@ -1118,8 +1159,10 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
     const requestedConfigInput = configOverride?.buttonActions
       ? normalizeVoiceConfig(configOverride)
       : voiceConfig;
-    const requested = resolveButtonConfigForRuntime(requestedConfigInput, usb.runtime);
-    const requestedConfig = requested.config;
+    const requestedConfig = normalizeVoiceConfig(requestedConfigInput);
+    const requested = resolveButtonConfigForRuntime(buttonConfigForDevice(requestedConfig,
+      usb.capabilities?.nativeUsbHid === "p4-hid-keyboard-v1",
+      usb.capabilities?.bluetoothShortcutKeys === "hid-usage-v1"), usb.runtime);
     const requestedRuntimeVoiceEnabled = requested.voiceEnabled;
     const requestedVoiceTriggerId = requested.voiceButton;
     if (!usb.connected) {
@@ -1135,13 +1178,24 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
     try {
       const ack = await dispatchBoardButtonConfig({
         boardDeviceId: targetBoardDeviceId,
-        buttonActions: requestedConfig.buttonActions,
-        buttonValues: requestedConfig.buttonValues,
+        capabilities: usb.capabilities,
+        expectedConnectionId: isP4Runtime ? usb.connectionId : undefined,
+        buttonActions: requested.config.buttonActions,
+        buttonValues: requested.config.buttonValues,
         runtime: usb.runtime,
         voiceButton: requestedVoiceTriggerId,
         voiceEnabled: requestedRuntimeVoiceEnabled,
       });
       if (!isCurrent()) return;
+      const readback = await invoke("usb_get_button_config", {
+        expectedBoardDeviceId: targetBoardDeviceId,
+      });
+      if (!isCurrent()) return;
+      if (!boardButtonConfigMatchesClient(requested.config, readback, usb.runtime, usb.capabilities || {})) {
+        throw new Error("设备回读的按键配置与本次下发不一致");
+      }
+      const settingsPending = isP4Runtime && usb.capabilities?.systemSettings !== true
+        && Object.values(requested.config.buttonActions).includes("system_settings");
       let voiceSetupWarning = "";
       try {
         if (isP4Runtime && requestedRuntimeVoiceEnabled) {
@@ -1192,16 +1246,16 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
       setVoiceConfigDirty(false);
       setVoiceConfigOtaState({
         pending: false,
-        tone: voiceSetupWarning ? "warning" : "success",
+        tone: voiceSetupWarning || settingsPending ? "warning" : "success",
         message: voiceSetupWarning
           ? `按钮配置已写入板端（${Number.isFinite(bindingCount) ? bindingCount : 0} 项）；语音通道未就绪：${voiceSetupWarning}`
-          : "按钮配置已同步到设备，可以按新的设置操作了。",
+          : settingsPending ? SETTINGS_NOT_READY : "已同步并核对设备按钮配置。",
       });
     } catch (err) {
       if (!isCurrent()) return;
       setVoiceConfigOtaState({ pending: false, tone: "error", message: `按钮配置下发失败: ${err}` });
     }
-  }, [voiceTarget.key, binding.boardDeviceId, isP4Runtime, onlineBoardDeviceId, sendAudioBridgeSignal, usb.boardDeviceId, usb.connected, usb.connectionId, usb.runtime, voiceConfig, voiceState.audioBridgeEnabled]);
+  }, [voiceTarget.key, binding.boardDeviceId, isP4Runtime, onlineBoardDeviceId, sendAudioBridgeSignal, usb.boardDeviceId, usb.capabilities, usb.connected, usb.connectionId, usb.runtime, voiceConfig, voiceState.audioBridgeEnabled]);
 
   const updateVoiceTrigger = useCallback(async (trigger) => {
     buttonConfigRevisionRef.current += 1;
@@ -1505,14 +1559,35 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
   // but the dashboard's large control tree and media previews do not.
   return (
     <>
+    {keyboardActive && <KeyboardConfiguration usb={usb} wifi={wifi} boardDeviceId={onlineBoardDeviceId || binding?.boardDeviceId}>
+      <Card>
+        <BoardButtonPanel
+          selectedAgentId={selectedAgentId}
+          voiceConfig={runtimeVoiceConfig}
+          buttonActions={voiceConfig.buttonActions}
+          buttonValues={voiceConfig.buttonValues}
+          buttonLabels={voiceConfig.buttonLabels}
+          runtime={usb.runtime}
+          voiceConfigDirty={voiceConfigDirty}
+          voiceConfigOtaState={voiceConfigOtaState}
+          usbConnected={Boolean(usb.connected)}
+          doublePressSupported={usb.capabilities?.inputDoublePress === true}
+          systemSettingsSupported={usb.capabilities?.systemSettings === true}
+          voiceKeySupported={usb.capabilities?.nativeUsbHid === "p4-hid-keyboard-v1"}
+          selectedTrigger={selectedVoiceTrigger}
+          onVoiceConfigChange={updateVoiceConfig}
+          onApplyVoiceConfig={applyVoiceConfigOverUsb}
+        />
+      </Card>
+    </KeyboardConfiguration>}
     {active && <PageShell
-      title="桌搭控制台"
+      title="Agent交互"
       help={hasKnownRuntime ? () => setGuideOpen(true) : undefined}
       actions={
         <DashboardActionsMenu
           onSendTest={onSendTest}
-          onCopyDesktopId={onCopyDesktopId}
-          onUnbind={onUnbindClick}
+          onCopyDesktopId={binding.desktopDeviceId ? onCopyDesktopId : undefined}
+          onUnbind={onUnbind ? onUnbindClick : undefined}
           onDeviceReturnHome={onDeviceReturnHome}
           onForceSyncAppearance={onForceSyncAppearance}
           onReconcileAppearance={onReconcileAppearance}
@@ -1532,8 +1607,24 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
         />
       }
     >
+      {usb.boardWedged && (
+        <div
+          role="alert"
+          style={{
+            margin: "10px 16px",
+            padding: "10px 14px",
+            borderRadius: 8,
+            background: "#7f1d1d",
+            color: "#fff",
+            fontSize: 13,
+            lineHeight: 1.5,
+          }}
+        >
+          设备已挂死（板端死锁）：请重插 USB 线恢复，应用会自动重连。
+        </div>
+      )}
       <Card>
-        <DeviceStatusBar />
+        <DeviceStatusBar onOpenDeviceSettings={onOpenDeviceSettings} />
       </Card>
 
       {realtimeChat?.error && !isRecoveringAsr(realtimeChat) && <div role="alert" className="message-banner message-banner--error">
@@ -1560,22 +1651,6 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
         <ChannelMatrixCard />
       </Card>
 
-      <Card>
-        <BoardButtonPanel
-          selectedAgentId={selectedAgentId}
-          voiceConfig={runtimeVoiceConfig}
-          buttonActions={voiceConfig.buttonActions}
-          buttonValues={voiceConfig.buttonValues}
-          buttonLabels={voiceConfig.buttonLabels}
-          runtime={usb.runtime}
-          voiceConfigDirty={voiceConfigDirty}
-          voiceConfigOtaState={voiceConfigOtaState}
-          usbConnected={Boolean(usb.connected)}
-          selectedTrigger={selectedVoiceTrigger}
-          onVoiceConfigChange={updateVoiceConfig}
-          onApplyVoiceConfig={applyVoiceConfigOverUsb}
-        />
-      </Card>
 
       <Card.Collapsible
         title="语音输入"
@@ -1591,7 +1666,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
             busSessionsLoaded: selectedAgentSessionsLoaded,
             busSessionId: p4SessionSync.sessionId,
             selectedAgentId,
-            deviceOnline,
+            deviceOnline: usb.connected,
             voiceRuntimeTargetKey: voiceTarget.key,
             voiceRuntimeTargetReady: voiceTarget.kind !== "waiting",
           }}
@@ -1608,12 +1683,7 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
         />
       </Card.Collapsible>
 
-      <Card title="设备总音量">
-        <DeviceVolumePanel usb={usb} active={active} />
-      </Card>
-      <Card>
-        <SharedLocationPanel active={active} controller={locationController} />
-      </Card>
+
 
       <Card.Collapsible
         title="实时对话"
@@ -1645,6 +1715,9 @@ export default function DeviceDashboard({ active = true, binding, onUnbind, onOp
         }}
         onInputConfigReset={onInputConfigReset}
         expectedBoardDeviceId={diagnosticsTargetBoardDeviceId}
+        wasmCapabilities={usb.connected && diagnosticsTargetBoardDeviceId
+          && usb.boardDeviceId === diagnosticsTargetBoardDeviceId
+          ? usb.capabilities : null}
       />
     </PageShell>}
     {editingPersona && <div hidden={!active}><PersonaVoiceModal

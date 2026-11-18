@@ -1,5 +1,10 @@
 /* Validates full snapshots before atomic replacement; expires by monotonic time. */
 #include "pet_p4_widget_data.h"
+#if PET_P4_SYSTEM_WIFI
+#include "pet_p4_wifi_data.h"
+#include "esp_timer.h"
+#include <stdio.h>
+#endif
 #if PET_P4_DATA_ROWS
 #include "pet_p4_data_rows.h"
 #endif
@@ -13,7 +18,7 @@
 #define EXT_RAM_BSS_ATTR
 #endif
 typedef struct {
-  bool used, clear_on_expire;
+  bool used, clear_on_expire, restored;
   char source[48], status[8], message[91], date[11];
   uint64_t received_ms;
   uint32_t ttl_ms;
@@ -23,7 +28,43 @@ typedef struct {
 static EXT_RAM_BSS_ATTR data_snapshot_t g_sources[PET_P4_DATA_MAX_SOURCES];
 static portMUX_TYPE g_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool snapshot_stale(const data_snapshot_t *s,uint64_t now_ms){
-  return now_ms<s->received_ms||now_ms-s->received_ms>s->ttl_ms;
+  return s->restored||now_ms<s->received_ms||now_ms-s->received_ms>s->ttl_ms;
+}
+#if PET_P4_SYSTEM_WIFI
+static EXT_RAM_BSS_ATTR data_snapshot_t g_local_stock, g_local_news, g_local_feed;
+static EXT_RAM_BSS_ATTR pet_wifi_watchlist_t g_watchlist;
+static uint64_t g_watchlist_revision;
+static bool feed_source(const char *source) {
+  return !strcmp(source, PET_WIFI_DATA_FEED) ||
+    !strncmp(source, PET_WIFI_DATA_FEED_PREFIX, sizeof(PET_WIFI_DATA_FEED_PREFIX) - 1);
+}
+static data_snapshot_t *local_slot(const char *source) {
+  if (!strcmp(source, PET_WIFI_DATA_STOCKS)) return &g_local_stock;
+  if (!strcmp(source, PET_WIFI_DATA_NEWS)) return &g_local_news;
+  if (strncmp(source, PET_WIFI_DATA_FEED_PREFIX, sizeof(PET_WIFI_DATA_FEED_PREFIX) - 1) == 0)
+    return &g_local_feed;
+  return NULL;
+}
+#endif
+/* Caller holds g_lock. A stale local quote yields to a fresh PC snapshot.
+ * Keep the most recent cache if both sources have expired. */
+static const data_snapshot_t *snapshot_for(const char *source, uint64_t now_ms) {
+  const data_snapshot_t *pc = NULL;
+  for (int i = 0; i < PET_P4_DATA_MAX_SOURCES; i++) {
+    if (g_sources[i].used && !strcmp(g_sources[i].source, source)) {
+      pc = &g_sources[i];
+      break;
+    }
+  }
+#if PET_P4_SYSTEM_WIFI
+  const data_snapshot_t *local = local_slot(source);
+  if (local && local->used && !strcmp(local->source, source) && (!pc || !snapshot_stale(local, now_ms) ||
+      (snapshot_stale(pc, now_ms) &&
+       (local->restored ? !pc->count : local->received_ms >= pc->received_ms)))) return local;
+#else
+  (void)now_ms;
+#endif
+  return pc;
 }
 #if PET_P4_DATA_ROWS
 /* One active filter at a time (the visible component); values follow its int vars. */
@@ -43,11 +84,10 @@ void pet_p4_widget_data_set_filter(const char *source,const pet_data_rows_config
 bool pet_p4_widget_data_select(const char *source,int32_t select,uint64_t now_ms,pet_p4_data_row_t *out){
   bool ok=false;if(!source||!source[0]||!out)return false;
   portENTER_CRITICAL(&g_lock);
-  for(int i=0;i<PET_P4_DATA_MAX_SOURCES;i++)if(g_sources[i].used&&!strcmp(g_sources[i].source,source)){
-    if(g_sources[i].clear_on_expire&&snapshot_stale(&g_sources[i],now_ms))break;
-    uint8_t visible[PET_P4_DATA_MAX_ROWS];unsigned n=visible_rows(&g_sources[i],visible);int at=pet_data_rows_select(n,select);
-    if(at>=0){*out=g_sources[i].rows[visible[at]];ok=true;}
-    break;
+  const data_snapshot_t *s = snapshot_for(source, now_ms);
+  if (s && !(s->clear_on_expire && snapshot_stale(s, now_ms))) {
+    uint8_t visible[PET_P4_DATA_MAX_ROWS];unsigned n=visible_rows(s,visible);int at=pet_data_rows_select(n,select);
+    if(at>=0){*out=s->rows[visible[at]];ok=true;}
   }
   portEXIT_CRITICAL(&g_lock);return ok;
 }
@@ -69,7 +109,8 @@ static bool safe_source(const char *s) {
   for (; *s; s++) if (!((*s >= 'a' && *s <= 'z') || (*s >= '0' && *s <= '9') || *s == '.' || *s == '_' || *s == '-')) return false;
   return true;
 }
-bool pet_p4_widget_data_apply(const cJSON *payload, uint64_t now_ms) {
+static bool apply(const cJSON *payload, uint64_t now_ms, bool local, uint64_t watchlist_revision,
+                  bool restored) {
   int schema, ttl;
   if (!cJSON_IsObject(payload) || !integer(payload, "schema", 1, 1, &schema)
       || !integer(payload, "ttlMs", 5000, 300000, &ttl)) return false;
@@ -94,6 +135,19 @@ bool pet_p4_widget_data_apply(const cJSON *payload, uint64_t now_ms) {
       }
     }
   }
+#if PET_P4_SYSTEM_WIFI
+  const cJSON *settings = cJSON_GetObjectItemCaseSensitive(payload, "deviceWatchlist");
+  pet_wifi_watchlist_t list;
+  uint64_t settings_revision = 0;
+  if ((restored && cJSON_IsTrue(clear_on_expire))
+      || (local && !local_slot(next->source))
+      || (!local && (!strcmp(next->source, PET_WIFI_DATA_NEWS) || feed_source(next->source)))
+      || (settings && (local || strcmp(next->source, PET_WIFI_DATA_STOCKS)
+          || !pet_wifi_watchlist_parse(settings, &list)))) goto done;
+#else
+  (void)local;
+  (void)watchlist_revision;
+#endif
   next->count = cJSON_GetArraySize(rows);
   for (int i = 0; i < next->count; i++) {
     const cJSON *row = cJSON_GetArrayItem(rows, i);
@@ -110,15 +164,59 @@ bool pet_p4_widget_data_apply(const cJSON *payload, uint64_t now_ms) {
   }
   next->used = true; next->ttl_ms = ttl; next->received_ms = now_ms;
   next->clear_on_expire = cJSON_IsTrue(clear_on_expire);
+  next->restored = restored;
   portENTER_CRITICAL(&g_lock);
-  int slot = -1;
-  for (int i = 0; i < PET_P4_DATA_MAX_SOURCES; i++) if (g_sources[i].used && !strcmp(g_sources[i].source, next->source)) { slot = i; break; }
-  if (slot < 0) for (int i = 0; i < PET_P4_DATA_MAX_SOURCES; i++) if (!g_sources[i].used) { slot = i; break; }
-  if (slot >= 0) { g_sources[slot] = *next; ok = true; }
+#if PET_P4_SYSTEM_WIFI
+  if (local) {
+    data_snapshot_t *slot = local_slot(next->source);
+    if ((!restored || !slot->used || (slot == &g_local_feed && strcmp(slot->source, next->source))) &&
+        (slot != &g_local_stock || watchlist_revision == g_watchlist_revision)) {
+      *slot = *next;
+      ok = true;
+    }
+  } else
+#endif
+  {
+    int slot = -1;
+    for (int i = 0; i < PET_P4_DATA_MAX_SOURCES; i++) if (g_sources[i].used && !strcmp(g_sources[i].source, next->source)) { slot = i; break; }
+    if (slot < 0) for (int i = 0; i < PET_P4_DATA_MAX_SOURCES; i++) if (!g_sources[i].used) { slot = i; break; }
+    if (slot >= 0) { g_sources[slot] = *next; ok = true; }
+  }
+#if PET_P4_SYSTEM_WIFI
+  if (ok && settings) {
+    if (!g_watchlist_revision || !pet_wifi_watchlist_equal(&g_watchlist, &list)) {
+      g_watchlist = list;
+      g_watchlist_revision++;
+      g_local_stock.used = false;
+    }
+    settings_revision = g_watchlist_revision;
+  }
+#endif
   portEXIT_CRITICAL(&g_lock);
+#if PET_P4_SYSTEM_WIFI
+  if (settings_revision) pet_wifi_data_set_watchlist(&list, settings_revision);
+#endif
 done:
   free(next); return ok;
 }
+bool pet_p4_widget_data_apply(const cJSON *payload, uint64_t now_ms) {
+  return apply(payload, now_ms, false, 0, false);
+}
+#if PET_P4_SYSTEM_WIFI
+bool pet_p4_widget_data_apply_local(const cJSON *payload, uint64_t now_ms, uint64_t watchlist_revision) {
+  return apply(payload, now_ms, true, watchlist_revision, false);
+}
+bool pet_p4_widget_data_restore_local(const cJSON *payload, uint64_t now_ms, uint64_t watchlist_revision) {
+  return apply(payload, now_ms, true, watchlist_revision, true);
+}
+bool pet_p4_widget_data_revalidate_feed(const char *source, uint64_t now_ms) {
+  portENTER_CRITICAL(&g_lock);
+  bool ok = g_local_feed.used && !g_local_feed.restored && !strcmp(g_local_feed.source, source);
+  if (ok) g_local_feed.received_ms = now_ms;
+  portEXIT_CRITICAL(&g_lock);
+  return ok;
+}
+#endif
 /* Caller holds g_lock. Preserve signed modulo for negative/int32-edge pages. */
 static pet_p4_data_paging_t snapshot_paging(const data_snapshot_t *s,int32_t page){
   int count=s->count;
@@ -131,31 +229,48 @@ static pet_p4_data_paging_t snapshot_paging(const data_snapshot_t *s,int32_t pag
 pet_p4_data_paging_t pet_p4_widget_data_paging(const char *source,int32_t page){
   pet_p4_data_paging_t out={.pages=1};
   if(!source||!source[0])return out;
+  uint64_t now_ms = 0;
+#if PET_P4_SYSTEM_WIFI
+  now_ms = (uint64_t)esp_timer_get_time() / 1000;
+#endif
   portENTER_CRITICAL(&g_lock);
-  for(int i=0;i<PET_P4_DATA_MAX_SOURCES;i++)if(g_sources[i].used&&!strcmp(g_sources[i].source,source)){
-    out=snapshot_paging(&g_sources[i],page);break;
-  }
+  const data_snapshot_t *s = snapshot_for(source, now_ms);
+#if PET_P4_SYSTEM_WIFI
+  if (s == &g_local_feed && s->clear_on_expire && snapshot_stale(s, now_ms)) s = NULL;
+#endif
+  if (s) out = snapshot_paging(s, page);
   portEXIT_CRITICAL(&g_lock);return out;
 }
 void pet_p4_widget_data_view(const char *source, int32_t page, uint64_t now_ms, pet_p4_data_view_t *out) {
   memset(out, 0, sizeof(*out));
   out->enabled = source && source[0]; out->pages = 1;
   if (!out->enabled) return;
+#if PET_P4_SYSTEM_WIFI
+  bool stock_local = false, feed_local = false;
+#endif
   portENTER_CRITICAL(&g_lock);
-  for (int i = 0; i < PET_P4_DATA_MAX_SOURCES; i++) {
-    const data_snapshot_t *s = &g_sources[i];
-    if (!s->used || strcmp(s->source, source)) continue;
+  const data_snapshot_t *s = snapshot_for(source, now_ms);
+  if (s) {
     out->received = true;
     out->stale = snapshot_stale(s,now_ms);
+#if PET_P4_SYSTEM_WIFI
+    out->restored = s->restored;
+    out->age_ms = now_ms >= s->received_ms ? now_ms - s->received_ms : UINT64_MAX;
+#endif
     if (s->clear_on_expire && out->stale) {
       strcpy(out->status, "empty");
       strcpy(out->message, "数据已过期，请刷新");
-      break;
+      portEXIT_CRITICAL(&g_lock);
+      return;
     }
     pet_p4_data_paging_t paging=snapshot_paging(s,page);
     out->pages=paging.pages;out->page=paging.page;
     strcpy(out->status, s->status); strcpy(out->message, s->message);
     strcpy(out->date, s->date);
+#if PET_P4_SYSTEM_WIFI
+    stock_local = s == &g_local_stock;
+    feed_local = s == &g_local_feed;
+#endif
     int start = out->page * PET_P4_DATA_PAGE_ROWS;
 #if PET_P4_DATA_ROWS
     uint8_t visible[PET_P4_DATA_MAX_ROWS];int total=(int)visible_rows(s,visible);
@@ -167,7 +282,15 @@ void pet_p4_widget_data_view(const char *source, int32_t page, uint64_t now_ms, 
     if (out->count > PET_P4_DATA_PAGE_ROWS) out->count = PET_P4_DATA_PAGE_ROWS;
     memcpy(out->rows, s->rows + start, out->count * sizeof(out->rows[0]));
 #endif
-    break;
   }
   portEXIT_CRITICAL(&g_lock);
+#if PET_P4_SYSTEM_WIFI
+  if ((stock_local || feed_local) && out->restored)
+    snprintf(out->message, sizeof(out->message), "离线缓存（已过期）");
+  else if (feed_local && out->stale)
+    snprintf(out->message, sizeof(out->message), "设备缓存（已过期）");
+  else if (stock_local && !out->message[0] && out->age_ms != UINT64_MAX)
+    snprintf(out->message, sizeof(out->message), "设备直连 · 缓存 %llu 秒%s",
+      (unsigned long long)(out->age_ms / 1000), out->stale ? "（已过期）" : "");
+#endif
 }

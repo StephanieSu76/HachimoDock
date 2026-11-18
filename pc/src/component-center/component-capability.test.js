@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { legacyAudioInstallBlockedReason, componentUsbInstallBlockedReason } from "./library-order.js";
 import { parseSync } from "@babel/core";
 import traverseModule from "@babel/traverse";
 const source = readFileSync(new URL("../ComponentCenter.jsx", import.meta.url), "utf8");
@@ -38,8 +39,8 @@ test("optional declarations do not become client installation vetoes",()=>{
 function syncFixture(overrides={}) {
  const events=[],syncInFlight={current:false};let installs=0;
  const ctx={
-  syncInFlight, usb:{connected:true,capabilities:{touchInput:{ready:false}}},
-  bindingConflictForComponent:()=>"",localInstallBlockedReason:actual("localInstallBlockedReason"),
+  syncInFlight, transferInFlight:{current:false}, usb:{connected:true,capabilities:{touchInput:{ready:false}}},
+  bindingConflictForComponent:()=>"",localInstallBlockedReason:actual("localInstallBlockedReason",{legacyAudioInstallBlockedReason}),componentUsbInstallBlockedReason,
   gameInstallBlockedReason:check,liveInventoryTarget:{transport:"usb",boardDeviceId:"synthetic-board"},
   push:e=>events.push(e),devicePackageState:()=>({key:"current"}),setDowngradeComponent:()=>events.push({downgrade:true}),
   deviceInventory:{freshness:"live",supportsMultiple:true,maxInstalled:33,items:[]},installedIds:new Set(),
@@ -60,7 +61,9 @@ test("actual install entry preserves capacity boundary",async()=>{
  const f=syncFixture({deviceInventory:{freshness:"live",supportsMultiple:true,maxInstalled:1,items:[{}]}});await f.run({id:"synthetic-component"});assert.equal(f.installs(),0);assert.match(f.events[0].title,/已满/);
 });
 test("actual install entry preserves pending-transfer boundary",async()=>{
- const f=syncFixture({syncInFlight:{current:true}});await f.run({id:"synthetic-component"});assert.equal(f.installs(),0);
+ for(const pending of [{syncInFlight:{current:true}},{transferInFlight:{current:true}}]){
+  const f=syncFixture(pending);await f.run({id:"synthetic-component"});assert.equal(f.installs(),0);
+ }
 });
 test("actual install failure is reported once without automatic retry",async()=>{
  let calls=0;const f=syncFixture({installSelectedComponent:async()=>{calls++;throw Error("synthetic transport unknown");}});await f.run({id:"synthetic-component"});assert.equal(calls,1);assert.equal(f.syncInFlight.current,false);assert.match(f.events[0].message,/transport unknown/);
@@ -68,7 +71,7 @@ test("actual install failure is reported once without automatic retry",async()=>
 function conflict(bindings,exitEvents=[]){return actual("bindingConflictForComponent",{
  usb:{connected:true,runtime:"esp-p4",boardDeviceId:"synthetic-board",capabilities:{touchInput:{ready:false}}},
  ...(source.includes("function deviceTouchReady(")?{deviceTouchReady:actual("deviceTouchReady")} : {}),
- globalExitBinding:{boardDeviceId:"synthetic-board",status:"ready"},globalExitEvents:exitEvents,
+ globalExitBinding:{boardDeviceId:"synthetic-board",status:"ready"},globalExitEvents:exitEvents,globalRealtimeEvents:[],
  resolveComponentBindings:()=>bindings,componentInputEventSlots:event=>[event],
 })({});}
 test("actual screen binding is not refused due to readiness",()=>{assert.equal(conflict([{label:"action",event:"screen.tap",controlLabel:"touch"}]),"");});

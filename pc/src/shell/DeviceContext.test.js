@@ -15,6 +15,7 @@ import {
   deriveCurrentDisplay,
   deriveDeviceReachability,
   normalizeUsbStatusPayload,
+  pairedWifiTarget,
   resolveUsbRuntime,
   usbStatusSnapshotsEqual,
 } from "./DeviceContext.pure.js";
@@ -106,9 +107,13 @@ test("provider polls USB status but does not auto-connect inside the polling eff
   assert.doesNotMatch(source, /usb auto-connect failed/);
 });
 
-test("provider has no WiFi or MQTT availability polling", () => {
-  assert.doesNotMatch(source, /wifiOnline|wifiBoardDeviceId|check_device_availability/);
-  assert.match(source, /deriveDeviceReachability\(\{\s*usb\s*\}\)/);
+test("provider obtains Wi-Fi reachability from the authenticated paired status", () => {
+  assert.match(source, /invoke\("lan_device_status"\)/);
+  assert.match(source, /usb\.connected \? null : pairedWifiTarget\(wifiStatus\)/);
+  assert.match(source, /activeBoardDeviceId = onlineBoardDeviceId \|\| binding\?\.boardDeviceId/);
+  assert.match(source, /deriveDeviceReachability\(\{ usb, wifi \}\)/);
+  assert.match(source, /if \(usb.connected\) return applyDesktopPet\(agentId, appearance, options\)/);
+  assert.match(source, /invoke\("lan_follow_agent", \{ \.\.\.wifi, agentId \}\)/);
 });
 
 test("USB status normalization keeps P4 capability metadata", () => {
@@ -182,7 +187,7 @@ test("USB runtime comes from handshake metadata and never from a COM number", ()
   assert.equal(resolveUsbRuntime({ runtime: "radxa" }), "linux");
 });
 
-test("P4 reachability follows only the verified USB connection", () => {
+test("P4 reachability prefers USB and uses authenticated Wi-Fi when USB disconnects", () => {
   const usb = normalizeUsbStatusPayload({
     connected: true,
     boardDeviceId: "p4-devkit-001",
@@ -200,6 +205,16 @@ test("P4 reachability follows only the verified USB connection", () => {
   });
   assert.equal(disconnected.deviceOnline, false);
   assert.equal(disconnected.onlineBoardDeviceId, "");
+  const status = { boardDeviceId: "p4-123456789abc", wifiConnected: true, bootId: "0123456789abcdef" };
+  assert.equal(pairedWifiTarget({ ...status, boardDeviceId: "p4-other" }), null);
+  assert.equal(pairedWifiTarget({ ...status, wifiConnected: false }), null);
+  assert.equal(pairedWifiTarget({ ...status, bootId: "" }), null);
+  const wifi = pairedWifiTarget(status);
+  assert.deepEqual(wifi, { boardDeviceId: status.boardDeviceId, bootId: status.bootId });
+  assert.deepEqual(deriveDeviceReachability({ usb, wifi }), connected);
+  assert.deepEqual(deriveDeviceReachability({ usb: { connected: false }, wifi }), {
+    deviceOnline: true, onlineBoardDeviceId: status.boardDeviceId,
+  });
 });
 
 test("provider hydrates followed channels locally without network availability reconciliation", () => {

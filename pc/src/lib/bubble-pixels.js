@@ -1,3 +1,5 @@
+import { BUBBLE_FONT_FAMILY, ensureBubbleFont, createBubbleCanvas } from "./bubble-font.js";
+export { BUBBLE_FONT_FAMILY } from "./bubble-font.js";
 // Wire geometry matches the device's session card; images contain alpha only.
 export const BUBBLE_STYLES = Object.freeze({
   1: { width: 474, height: 38, px: 32, lines: 1, lineHeight: 38, maxPages: 1 },
@@ -6,7 +8,6 @@ export const BUBBLE_STYLES = Object.freeze({
   4: { width: 496, height: 54, px: 24, lines: 2, lineHeight: 27, maxPages: 1 },
 });
 const encoder = new TextEncoder();
-const FONT_FAMILY = '"Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif';
 
 export function clampBubbleText(value, limit) {
   let result = "", size = 0;
@@ -161,13 +162,13 @@ export function wrapBubbleText(text, measure, width, maxLines) {
     .map(line => line.map(run => run.text).join(""));
 }
 
-export function renderBubblePixels(style, text, createCanvas = () => document.createElement("canvas"), pageIndex = 0) {
+export function renderBubblePixels(style, text, createCanvas = createBubbleCanvas, pageIndex = 0) {
   const spec = BUBBLE_STYLES[style];
   if (!spec || !text || encoder.encode(text).length > 511) throw Error("Invalid bubble text");
   const canvas = createCanvas(); canvas.width = spec.width; canvas.height = spec.height;
   const context = canvas.getContext("2d", { willReadFrequently: true });
   if (!context) throw Error("Canvas text rendering is unavailable");
-  const font = bold => `${bold ? 700 : 500} ${spec.px}px ${FONT_FAMILY}`;
+  const font = bold => `${bold ? 700 : 500} ${spec.px}px ${BUBBLE_FONT_FAMILY}`;
   const measure = (value, bold) => { context.font = font(bold); return context.measureText(value).width; };
   context.textBaseline = "alphabetic";
   const lines = wrapBubbleRuns(parseBubbleMarkdown(text), measure,
@@ -204,7 +205,7 @@ export function renderBubblePixels(style, text, createCanvas = () => document.cr
     checksum: bubbleChecksum(bytes), data: btoa(binary) };
 }
 
-export function collectBubbleTexts(topic, payload) {
+export function collectBubbleTexts(topic, payload, { includeDeferred = false } = {}) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
   const requests = new Map();
   const add = (style, value, limit) => {
@@ -217,17 +218,36 @@ export function collectBubbleTexts(topic, payload) {
   const first = (...keys) => keys.map(key => payload?.[key]).find(value => typeof value === "string" && value);
 
   if (topic === "session/current") {
-    // Native emits one bounded owner descriptor; titles precede bodies.
-    const sessions = (Array.isArray(payload.sessions) ? payload.sessions : [])
+    // Native already emits at most three visible session owners. Keep initial
+    // traffic to title/body (six assets across those owners, device has eight
+    // slots). Compact alternatives remain available to exact device needs.
+    let sessions = (Array.isArray(payload.sessions) ? payload.sessions : [])
       .filter(session => session && typeof session === "object" && !Array.isArray(session)).slice(0, 8);
-    sessions.sort((a, b) => Number(a.id === payload.sessionId) - Number(b.id === payload.sessionId));
-    for (const session of sessions) pair(session.title, session.content || session.state, 191, 383);
+    if (!includeDeferred) {
+      const selected = Math.max(0, sessions.findIndex(session => session.id === payload.sessionId));
+      const start = Math.min(Math.max(0, selected - 1), Math.max(0, sessions.length - 3));
+      sessions = sessions.slice(start, start + 3);
+    }
+    sessions.sort((a, b) => Number(b.id === payload.sessionId) - Number(a.id === payload.sessionId));
+    for (const session of sessions) {
+      pair(session.title, session.content || session.state, 191, 383);
+      if (includeDeferred) {
+        add(3, session.content || session.state, 511);
+        add(3, session.title, 511);
+      }
+    }
   } else if (topic === "ui/conversation") {
-    add(1, payload.name || "宠物", 63);
-
+    // Visible title/body must arrive before speculative status/compact assets.
     pair(payload.role === "user" ? "你" : payload.name || "宠物", payload.text, 63, 511, 2);
+    if (includeDeferred) {
+      add(1, payload.name || "宠物", 63);
+      for (const hint of ["我在听", "想一想", "准备回答", "准备中"]) add(2, hint, 511);
+      add(3, payload.text, 511);
+      add(3, payload.name || "宠物", 511);
+    }
   } else if (topic === "audio/play_subtitle") {
     add(2, payload.text, 511);
+    add(3, payload.text, 511);
   } else if (topic === "speech/text" || topic.startsWith("state/")) {
     const body = first("displayContent", "text", "message", "speech", "summary", "statusText");
     pair(first("displayTitle", "sessionName", "title", "agent") || "pet", body);
@@ -242,6 +262,9 @@ export function collectBubbleTexts(topic, payload) {
 export async function startBubblePixelService({ listen, invoke, render = renderBubblePixels,
   interval = 180, now = () => Date.now(), setTimer = setTimeout, clearTimer = clearTimeout,
   instance = globalThis.crypto.randomUUID().replaceAll("-", "") }) {
+  // The real renderer cannot advertise readiness or rasterize system fallback.
+  // Injected test/embedding renderers own their font preparation.
+  if (render === renderBubblePixels) await ensureBubbleFont();
   let stopped = false, busy = false, peer = "", timer = null, epoch = 0, inflightOwner = "";
   const pending = new Map(), desired = new Map(), cooldown = new Map();
   const schedule = () => {
@@ -267,9 +290,8 @@ export async function startBubblePixelService({ listen, invoke, render = renderB
         bootId: job.bootId, rendererId: instance, owner: job.owner, version: job.version } });
       if (!current(job)) return;
       job.next++; job.attempts = 0;
-      // Lazy pages are separate assets, appended only after this page completed.
-      if (!job.need && request.style === 2 && (request.page || 0) + 1 < (image.pageCount || 1))
-        job.requests.push({ ...request, page: (request.page || 0) + 1 });
+      // Future subtitle pages are device-demanded. Eagerly filling all pages
+      // evicts currently visible title/body assets from the eight-slot cache.
       if (job.next < job.requests.length) pending.set(owner, job);
     } catch (error) {
       // Only native PRE-admission contention is retryable. Never replay an
@@ -288,10 +310,13 @@ export async function startBubblePixelService({ listen, invoke, render = renderB
     if (nextPeer !== peer) { peer = nextPeer; epoch++; pending.clear(); desired.clear(); cooldown.clear(); }
     if (event.retired) { desired.delete(event.owner); pending.delete(event.owner); cooldown.delete(event.owner); return; }
     const prior = desired.get(event.owner);
+    if (event.need && prior && prior.version !== event.version) return;
     if (event.need && ((cooldown.get(event.owner) || 0) > now() || pending.has(event.owner)
         || (busy && inflightOwner === event.owner))) return;
     if (prior?.version === event.version && !event.need) return;
-    let requests = collectBubbleTexts(event.topic, event.payload);
+    let requests = event.topic === "device/need" && typeof event.payload?.text === "string"
+      ? [{ style: event.need?.style, text: event.payload.text, page: 0 }]
+      : collectBubbleTexts(event.topic, event.payload, { includeDeferred: Boolean(event.need) });
     if (event.need) {
       if (!Number.isInteger(event.need.page) || event.need.page < 0
           || event.need.page >= (BUBBLE_STYLES[event.need.style]?.maxPages || 0)) return;

@@ -39,6 +39,8 @@ void pet_p4_diagnostics_process(
   const pet_p4_runtime_state_t *state
 );
 bool pet_p4_diagnostics_reboot_pending(void);
+/* Call from the existing serialized device control owner. */
+bool pet_p4_diagnostics_schedule_reboot(const pet_p4_runtime_state_t *state);
 
 #ifdef __cplusplus
 }

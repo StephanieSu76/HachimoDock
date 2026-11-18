@@ -113,7 +113,7 @@ UTF-16 代理项必须正确配对，不能用替换字符静默修复。Python/
 | `note` | 156 | 必要的补充事实 |
 | `footer` | 156 | 当前可执行的 1-3 个动作 |
 | `progress` | 64 | negative-screen 初始预览用 `{value,label}`；runtime 只能用 `{pct_of,of_max,label}`、字符串或 `{var}` |
-| `visualStyle` | 16 | 新包默认 `clean`；用户明确要求复古/像素/街机时才用 `pixel`；`classic` 仅兼容旧包 |
+| `visualStyle` | 16 | 新包默认 `clean`。字段兼容 `pixel`，`classic` 仅用于历史包 |
 | `visualPalette` | 16 | `candy|sunset|mint|arcade|ocean|forest|ember|mono` |
 | `visualLayout` | 16 | `arcade|scoreboard|tool` |
 | `visualSprite` | 16 | 见下方安全图标 |
@@ -129,7 +129,7 @@ blocks snake flappy mole-ready mole-left mole-center mole-right
 
 - `tool` 使用 `visualLayout: "tool"`，黑色 LCD 底与单一强调色，通常只突出一个大指标。
 - `game` 使用 `arcade` 或 `scoreboard`，主视觉服务玩法局面，而不是数据看板。
-- `clean` 必须体现现代卡片层级、留白、圆角和语义轮廓；不能只是隐藏格子缝隙。可见像素网格、方块化主体和 8-bit 装饰只属于用户明确要求的 `pixel` 风格。
+- `clean` 用留白、对齐和清晰轮廓建立层级。按 640×480 打磨字形、图标和素材细节，卡片和圆角按题材使用。见 [UI 设计与验收](ui-design.md)。
 - 不在多个槽位重复同一事实。没有真实含义就省略 `eyebrow`、`note` 或 `badge`。
 - CJK 通常每字 3 字节，emoji 通常 4 字节；所有上限按 UTF-8 字节计算。
 - 动态值必须绑定 runtime var/formatter，不得把看似实时的数字硬编码进初始画面。

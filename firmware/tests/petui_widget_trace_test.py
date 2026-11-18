@@ -86,9 +86,10 @@ static bool action(const cJSON *p,char *error,size_t size){
 static bool handle_background_program_topic(pet_p4_runtime_state_t *s,const char *t,const cJSON *p,pet_p4_send_line_fn f,void *c){
  (void)s;(void)t;(void)f;(void)c;return action(p,NULL,0);
 }
-static bool pet_p4_miniapp_install_begin(const cJSON*p,char*e,size_t s){return action(p,e,s);}
-static bool pet_p4_miniapp_install_chunk(const cJSON*p,char*e,size_t s){return action(p,e,s);}
-static bool pet_p4_miniapp_install_commit(const cJSON*p,char*e,size_t s){return action(p,e,s);}
+static void pet_p4_miniapp_install_status(const cJSON *request,cJSON *payload){(void)request;(void)payload;assert(!"unexpected status route");}
+static bool pet_p4_miniapp_transfer_begin(const cJSON*p,char*e,size_t s){return action(p,e,s);}
+static bool pet_p4_miniapp_transfer_chunk(const cJSON*p,char*e,size_t s){return action(p,e,s);}
+static bool pet_p4_miniapp_transfer_commit(const cJSON*p,char*e,size_t s){return action(p,e,s);}
 static bool pet_p4_miniapp_resource_repair_active(void){return false;}
 static void pet_p4_miniapp_sync_stats(int *stats){*stats=3;}
 static bool send_widget_inventory(pet_p4_runtime_state_t*s,const cJSON*p,pet_p4_send_line_fn f,void*c){

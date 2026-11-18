@@ -1,6 +1,6 @@
 /**
  * [Input] children tree consuming useDeviceContext; Tauri invoke/listen for verified P4 USB status, appearance sync progress, manual serial rescan, bindings, and agents; lib helpers for appearance/agent storage.
- * [Output] Single USB-only source of polling and derived state (binding, USB status, deviceOnline, force-refreshable appearances, agentAppearanceMap, enabledAgents, bridge-authoritative selectedAgentId, agentOptions, agentScan, currentDisplay, target-verified per-device currentComponent, cancellable appearanceSync); USB polling is single-flight and suppresses unchanged Context updates; defaults a truly unconfigured first run to Codex while preserving saved local/Bridge selection, exposes deduplicated manual Agent refresh plus focus-triggered stale refresh, hydrates the active channel from the bridge profile before trusting localStorage cache, and keeps follow changes explicitly USB-only; Rust owns background serial auto-connect while manual rescan can explicitly scan/connect.
+ * [Output] Shared device state with verified USB priority and authenticated Wi-Fi reachability, current Agent selection and appearance, and explicit Agent follow over the active transport. Appearance transfers use USB.
  *          Saved-persona events refresh the current target immediately; every conversation start reads fresh disk settings.
  *          Current-key usage help is published by the dashboard and consumed across setup surfaces.
  * [Pos] component node in pc/src/shell
@@ -17,7 +17,9 @@ import React, {
   useState,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { LAN_AGENT_PAIRING_UPDATED, readLanAgentPairing, readRealtimeWifiBoard } from "../dashboard/lanAgentPairing.js";
 import { buildUsageHelp } from "../lib/usage-help.js";
+import { createRealtimePressHandler } from "../lib/realtime-press.js";
 import { listen } from "@tauri-apps/api/event";
 import {
   DEFAULT_AGENT_ID,
@@ -48,6 +50,7 @@ import {
   deriveCurrentDisplay,
   deriveDeviceReachability,
   normalizeUsbStatusPayload,
+  pairedWifiTarget,
   usbStatusSnapshotsEqual,
 } from "./DeviceContext.pure.js";
 
@@ -86,6 +89,16 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
   useEffect(() => { if (!binding) setUsageHelp(EMPTY_USAGE_HELP); }, [binding]);
 
   const [usb, setUsb] = useState({ connected: false, portName: "", boardDeviceId: "" });
+  const [wifiStatus, setWifiStatus] = useState(null);
+  const wifi = useMemo(() => usb.connected ? null : pairedWifiTarget(wifiStatus),
+    [usb.connected, wifiStatus]);
+  const { deviceOnline, onlineBoardDeviceId } = useMemo(
+    () => deriveDeviceReachability({ usb, wifi }),
+    [usb, wifi],
+  );
+  const activeBoardDeviceId = onlineBoardDeviceId || binding?.boardDeviceId || "";
+  const realtimeWifiReady = Boolean(wifi && wifiStatus?.wirelessRealtime && wifiStatus?.controlTrusted);
+  const [wifiAppearance, setWifiAppearance] = useState(null);
   const [appearances, setAppearances] = useState([]);
   const [agentAppearanceMap, setAgentAppearanceMap] = useState({});
   const [enabledAgents, setEnabledAgents] = useState(
@@ -109,6 +122,7 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
     if (usb.connected && usbBoardDeviceId) {
       return { transport: "usb", boardDeviceId: usbBoardDeviceId };
     }
+    if (wifi) return { transport: "usb", boardDeviceId: wifi.boardDeviceId };
     const sshHost = readConfiguredComponentSshHost();
     if (sshHost) return { transport: "ssh", sshHost };
     const rememberedBoardDeviceId = String(binding?.boardDeviceId || "").trim();
@@ -119,6 +133,7 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
     binding?.boardDeviceId,
     usb.boardDeviceId,
     usb.connected,
+    wifi,
   ]);
   const currentComponent = useMemo(
     () => readActiveComponentForTarget(currentComponentTarget),
@@ -204,6 +219,57 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
       unlisteners.forEach((stop) => { try { stop(); } catch { /* already closed */ } });
     };
   }, []);
+
+  useEffect(() => {
+    if (usb.connected) {
+      setWifiStatus(null);
+      return;
+    }
+    let disposed = false;
+    let revision = 0;
+    let inFlight = false;
+    let refreshPending = false;
+    const refreshWifi = async () => {
+      if (disposed || inFlight) return;
+      inFlight = true;
+      const startedAt = revision;
+      let target = null;
+      try {
+        if (await readLanAgentPairing()) {
+          const status = await invoke("lan_device_status");
+          if (pairedWifiTarget(status)) {
+            target = { boardDeviceId: status.boardDeviceId, bootId: status.bootId, wifiConnected: true,
+              wirelessRealtime: status.wirelessRealtime === true, controlTrusted: status.controlTrusted === true };
+          }
+        }
+      } catch { /* a saved pairing alone does not prove reachability */ }
+      if (!disposed && startedAt === revision) {
+        setWifiStatus(previous => previous?.boardDeviceId === target?.boardDeviceId
+          && previous?.bootId === target?.bootId
+          && previous?.wirelessRealtime === target?.wirelessRealtime
+          && previous?.controlTrusted === target?.controlTrusted ? previous : target);
+      }
+      inFlight = false;
+      if (refreshPending) {
+        refreshPending = false;
+        void refreshWifi();
+      }
+    };
+    const onPairingChange = () => {
+      revision += 1;
+      setWifiStatus(null);
+      if (inFlight) refreshPending = true;
+      else void refreshWifi();
+    };
+    void refreshWifi();
+    const timer = setInterval(refreshWifi, 5000);
+    window.addEventListener(LAN_AGENT_PAIRING_UPDATED, onPairingChange);
+    return () => {
+      disposed = true;
+      clearInterval(timer);
+      window.removeEventListener(LAN_AGENT_PAIRING_UPDATED, onPairingChange);
+    };
+  }, [usb.connected]);
 
   // --- Initial: load bridge profile, detect agents, list appearances ---
   const loadAppearancesData = useCallback(async ({ force = false } = {}) => {
@@ -323,6 +389,16 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
     ]);
   }, [loadBridgeSelection, refreshAgents, refreshAppearances]);
 
+  const getAppearanceSerialResetRequired = useCallback((expectedBoardDeviceId) => (
+    invoke("usb_appearance_serial_reset_required", { expectedBoardDeviceId })
+  ), []);
+
+  const recoverAppearanceSerial = useCallback(async (expectedBoardDeviceId) => {
+    const status = normalizeUsbStatusPayload(await invoke("usb_recover_appearance_serial", { expectedBoardDeviceId }));
+    setUsb(status);
+    return status;
+  }, []);
+
   const rescanUsbDevices = useCallback(async () => {
     const devices = await invoke("usb_scan_devices");
     const list = Array.isArray(devices) ? devices : [];
@@ -340,7 +416,9 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
           break;
         }
       } catch (error) {
-        lastError = error;
+        if (!lastError || String(lastError?.message || lastError) !== "appearance_raw_stream_quarantined_no_probe") {
+          lastError = error;
+        }
       }
     }
     const nextUsb = connectedStatus || normalizeUsbStatusPayload(await invoke("usb_get_status"));
@@ -349,16 +427,15 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
     return { devices: list, status: nextUsb };
   }, []);
 
-  const currentDisplay = useMemo(
-    () => deriveCurrentDisplay(agentAppearanceMap, enabledAgents, appearances, agentOptions),
-    [agentAppearanceMap, enabledAgents, appearances, agentOptions],
-  );
-
-  const { deviceOnline, onlineBoardDeviceId } = useMemo(
-    () => deriveDeviceReachability({ usb }),
-    [usb],
-  );
-  const deviceConnected = deviceOnline;
+  const currentDisplay = useMemo(() => {
+    const display = deriveCurrentDisplay(agentAppearanceMap, enabledAgents, appearances, agentOptions);
+    if (wifiAppearance && wifiAppearance.boardDeviceId === activeBoardDeviceId) {
+      const retained = appearances.find(record => record.id === wifiAppearance.appearanceId);
+      if (retained) return { ...display, appearance: retained };
+    }
+    return display;
+  }, [agentAppearanceMap, enabledAgents, appearances, agentOptions, activeBoardDeviceId, wifiAppearance]);
+  const deviceConnected = usb.connected;
 
   const applyDesktopPet = useCallback(
     async (agentId, appearance, options = {}) => {
@@ -432,6 +509,7 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
           isCurrent,
         });
         setAgentAppearanceMap(nextMap);
+        setWifiAppearance(null);
         const enabled = new Set(assignedAgentIds(nextMap, agentId));
         setEnabledAgents(enabled);
         setBridgeSelectedAgentId(agentId);
@@ -453,6 +531,7 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
         const committed = error?.committedAssignment;
         if (committed && appearanceAssignmentOwnerRef.current === owner) {
           setAgentAppearanceMap(committed.nextMap);
+          setWifiAppearance(null);
           setEnabledAgents(new Set(committed.enabledAgents));
           setBridgeSelectedAgentId(committed.agentId);
         }
@@ -471,6 +550,38 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
     },
     [agentAppearanceMap, agentOptions, binding, currentDisplay, onlineBoardDeviceId, usb.boardDeviceId, usb.connectionId, usb.bootId],
   );
+
+  const followAgent = useCallback(async (agentId, appearance, options) => {
+    if (usb.connected) return applyDesktopPet(agentId, appearance, options);
+    if (!wifi) throw new Error("请连接 USB，或先与当前设备完成 Wi-Fi 配对。");
+    if (appearanceAssignmentOwnerRef.current) throw new Error(FOLLOW_ASSIGNMENT_BUSY_MESSAGE);
+    const owner = { boardDeviceId: wifi.boardDeviceId };
+    appearanceAssignmentOwnerRef.current = owner;
+    setAppearanceSync({ ...EMPTY_APPEARANCE_SYNC, pending: true, agentId,
+      progress: { text: "正在通过 Wi-Fi 提交跟随…", followOnly: true } });
+    try {
+      await invoke("lan_follow_agent", { ...wifi, agentId });
+      if (appearanceAssignmentOwnerRef.current !== owner) return {};
+      const enabled = new Set([agentId]);
+      setEnabledAgents(enabled);
+      setBridgeSelectedAgentId(agentId);
+      saveEnabledAgents(enabled);
+      if (currentDisplay.appearance?.id) {
+        setWifiAppearance({ boardDeviceId: wifi.boardDeviceId, appearanceId: currentDisplay.appearance.id });
+      }
+      try {
+        await invoke("ensure_bridge_runtime", { input: { forceRestart: true } });
+      } catch {
+        throw new Error("Wi-Fi 跟随已提交，桌面配置已保存，但本地桥接服务未就绪。");
+      }
+      return { notice: "已通过 Wi-Fi 提交跟随，设备继续使用当前形象。" };
+    } finally {
+      if (appearanceAssignmentOwnerRef.current === owner) {
+        appearanceAssignmentOwnerRef.current = null;
+        setAppearanceSync(EMPTY_APPEARANCE_SYNC);
+      }
+    }
+  }, [applyDesktopPet, currentDisplay.appearance?.id, usb.connected, wifi]);
 
   const cancelAppearanceSync = useCallback(async () => {
     if (!appearanceSync.pending || appearanceSync.cancelling) {
@@ -537,22 +648,25 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
   useEffect(() => {
     realtimeTargetRef.current = {
       appearance: currentDisplay.appearance || null,
-      boardDeviceId: String(usb.boardDeviceId || "").trim(),
+      boardDeviceId: usb.connected ? String(usb.boardDeviceId || "").trim() : "",
     };
-  }, [currentDisplay.appearance, usb.boardDeviceId]);
+  }, [currentDisplay.appearance, usb.boardDeviceId, usb.connected]);
 
   const startRealtimeChat = useCallback(async (options = {}) => {
     const target = realtimeTargetRef.current;
     const selectedAppearance = options.appearance || target.appearance;
     const appearance = selectedAppearance ? await getAppearance(selectedAppearance.id) : null;
-    const boardDeviceId = String(options.boardDeviceId || target.boardDeviceId || "").trim();
+    const boardDeviceId = String(options.boardDeviceId || target.boardDeviceId || await readRealtimeWifiBoard() || "").trim();
     if (!appearance) throw new Error("设备上还没有形象，先在画廊里应用一个形象");
     if (!appearance.personaVoice?.configured) {
       throw new Error(`「${appearance.name}」还没有设置人设与声音，先在画廊卡片右下角设置`);
     }
-    if (!boardDeviceId) throw new Error("设备未通过 USB 连接");
+    if (!boardDeviceId) throw new Error("请通过 USB 连接设备，或在设置中完成 Wi-Fi 配对。");
+    if (options.isCurrent && !options.isCurrent()) throw new Error("对话请求已取消");
     realtimeReconcilerRef.current?.invalidate();
-    const status = await invoke("realtime_chat_start", { input: buildRealtimeChatStartInput(appearance, boardDeviceId) });
+    const status = options.lanPress
+      ? await invoke("lan_realtime_toggle", { token: options.lanPress, input: buildRealtimeChatStartInput(appearance, boardDeviceId) })
+      : await invoke("realtime_chat_start", { input: buildRealtimeChatStartInput(appearance, boardDeviceId) });
     realtimeReconcilerRef.current?.invalidate();
     setRealtimeChat((current) => mergeStatus(current, { ...status, error: "" }));
     return status;
@@ -585,6 +699,11 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
     }).then((stop) => { if (disposed) stop(); else unlisteners.push(stop); }).catch(() => {});
     // Recover the final error even if a fast failure raced listener registration.
     const refresh = setInterval(pollStatus, 2000);
+    const lanPress = createRealtimePressHandler({
+      accept: token => invoke("lan_realtime_toggle", { token, input: null }),
+      configure: (token, isCurrent) => startRealtimeChat({ boardDeviceId: token.boardDeviceId, lanPress: token, isCurrent }),
+      onError: error => setRealtimeChat(current => ({ ...current, error: error?.message || String(error) })),
+    });
     // 板端「实时对话」键：Rust 不知道设备上是哪个形象，由这里用当前形象拉起会话。
     listen("realtime-chat-request", (event) => {
       const boardDeviceId = String(event?.payload?.boardDeviceId || "").trim();
@@ -595,9 +714,16 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
         setRealtimeChat((current) => ({ ...current, active: false, state: "idle", error: message }));
         invoke("usb_send_speech", { text: message.slice(0, 60) }).catch(() => {});
       });
-    }).then((stop) => { if (disposed) stop(); else unlisteners.push(stop); }).catch(() => {});
+    }).then(async (stop) => {
+      if (disposed) { stop(); return; }
+      unlisteners.push(stop);
+      // Install key acceptance only after realtime UI handling is registered.
+      const stopLan = await listen("lan-realtime-press", lanPress.handle);
+      if (disposed) stopLan(); else unlisteners.push(stopLan);
+    }).catch(() => {});
     return () => {
       disposed = true;
+      lanPress.dispose();
       reconciler.dispose();
       if (realtimeReconcilerRef.current === reconciler) realtimeReconcilerRef.current = null;
       clearInterval(refresh);
@@ -610,6 +736,9 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
       binding,
       setBinding,
       usb,
+      wifi,
+      activeBoardDeviceId,
+      realtimeWifiReady,
       deviceOnline,
       onlineBoardDeviceId,
       deviceConnected,
@@ -630,9 +759,12 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
       startRealtimeChat,
       stopRealtimeChat,
       applyDesktopPet,
+      followAgent,
       cancelAppearanceSync,
       saveAgentAppearance,
       rescanUsbDevices,
+      recoverAppearanceSerial,
+      getAppearanceSerialResetRequired,
       refreshAgents,
       refreshAppearances,
       refresh,
@@ -641,6 +773,9 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
       binding,
       setBinding,
       usb,
+      wifi,
+      activeBoardDeviceId,
+      realtimeWifiReady,
       deviceOnline,
       onlineBoardDeviceId,
       deviceConnected,
@@ -660,9 +795,12 @@ export function DeviceContextProvider({ binding: bindingProp, onBindingChange, c
       startRealtimeChat,
       stopRealtimeChat,
       applyDesktopPet,
+      followAgent,
       cancelAppearanceSync,
       saveAgentAppearance,
       rescanUsbDevices,
+      recoverAppearanceSerial,
+      getAppearanceSerialResetRequired,
       refreshAgents,
       refreshAppearances,
       refresh,

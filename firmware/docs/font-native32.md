@@ -23,16 +23,3 @@ CMake intentionally embeds old and column metric inputs. Final V1 AND V3 linked 
 `tests/p4_font_native32_test.py` compares all original pixels, 200 descriptors and 199 Unicode entries; exercises the actual parent startup via a host-zlib ROM adapter with ASan/UBSan, all three stage failures/length/checksum faults, full-buffer clearing, reentry/retry latches, exhaustive BMP lookup, and actual extracted draw/bounds/width functions. The release mock invalidates its descriptor. Existing packed-font, glyph, raster, renderer trace and renderer policy tests are retained.
 
 For a real SDK object check, expand the PIO profile macros in addition to CCDB arguments, e.g. the existing `p4_storage_zero_bss_test._profile_cpp` for the target profile. CCDB alone can omit packed-font flags and correctly trigger the gate error. No claim of real P4 ROM timing, final linked budgets, visual or hardware acceptance is made by host tests.
-
-## 2026-11-03 完整预览镜像结果
-
-`0.7.103-p4-r165-font-preview` 的两种目标均已实际开启该功能构建：
-
-| 目标 | 应用镜像 | 旧 2,621,440 B 槽余量 | 比 R164 缩小 |
-|---|---:|---:|---:|
-| V1 | 2,454,320 B | 167,120 B | 12,224 B |
-| V3 | 2,469,408 B | 152,032 B | 12,096 B |
-
-两种目标均保留原 131,072 B 最低余量门槛，通过内部静态 RAM 检查，已审阅渲染栈最大为 3,568/4,096 B。两份完整 ELF 均确认旧度量表 payload 不存活，新位图位于外部 BSS，列编码资源大小为 27,793 B。PlatformIO 的基础 `board_build.embed_files` 同时登记了列编码资源。
-
-该结果属于离线候选验收。默认开关仍为 0；未刷机、未运行静默 HIL，实机字体效果及帧耗时尚未验收。

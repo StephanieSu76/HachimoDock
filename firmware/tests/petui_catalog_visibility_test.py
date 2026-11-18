@@ -20,6 +20,9 @@ int main(void){
  assert(catalog_visible_preferred_in(next,3,99)==1);
  assert(catalog_visible_preferred_in(next,1,0)==-1);
  assert(catalog_visible_preferred_in(next,0,-1)==-1);
+ miniapp_catalog_item_t merged[2]={{.widget_id="upcoming-todos"},{.widget_id="hachimi-notes"}};
+ assert(catalog_visible_preferred_in(merged,2,0)==1);
+ assert(!catalog_item_visible(&merged[0]));
  return 0;
 }''')
     subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-fsanitize=address,undefined',str(source),'-o',str(exe)],check=True)

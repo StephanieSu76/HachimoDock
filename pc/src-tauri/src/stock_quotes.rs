@@ -596,6 +596,19 @@ fn data_snapshot(status: &StockStatus) -> DataSnapshot {
         rows,
     }
 }
+fn wire_snapshot(
+    snapshot: &StockStatus,
+    capabilities: &serde_json::Value,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut payload = serde_json::to_value(data_snapshot(snapshot))?;
+    if capabilities.get("widgetWifiData").and_then(serde_json::Value::as_str)
+        == Some("p4-wifi-data-v1")
+    {
+        payload["deviceWatchlist"] = serde_json::to_value(&snapshot.settings.symbols)?;
+    }
+    Ok(payload)
+}
+
 pub fn start(usb: crate::usb_serial::UsbSerialManager) {
     tauri::async_runtime::spawn(async move {
         let mut last_sent = 0;
@@ -616,7 +629,7 @@ pub fn start(usb: crate::usb_serial::UsbSerialManager) {
                     || now_ms().saturating_sub(last_sent) >= INTERVAL_MS)
             {
                 if let Ok(snapshot) = stock_watchlist_status() {
-                    if let Ok(payload) = serde_json::to_value(data_snapshot(&snapshot)) {
+                    if let Ok(payload) = wire_snapshot(&snapshot, &status.capabilities) {
                         let manager = usb.clone();
                         let board = status.board_device_id.clone();
                         let sent = tauri::async_runtime::spawn_blocking(move || {
@@ -642,6 +655,25 @@ pub fn start(usb: crate::usb_serial::UsbSerialManager) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wifi_watchlist_settings_require_the_exact_device_capability() {
+        let snapshot = StockStatus {
+            settings: Watchlist { symbols: vec!["hk01810".into(), "usAAPL".into()] },
+            quotes: vec![],
+            error: String::new(),
+            fetched_at_ms: 0,
+            refreshing: false,
+        };
+        let legacy = wire_snapshot(&snapshot, &serde_json::json!({"widgetWifiData":true})).unwrap();
+        let wifi = wire_snapshot(&snapshot, &serde_json::json!({"widgetWifiData":"p4-wifi-data-v1"})).unwrap();
+        assert!(legacy.get("deviceWatchlist").is_none());
+        assert_eq!(wifi["deviceWatchlist"], serde_json::json!(["hk01810", "usAAPL"]));
+        assert_eq!(legacy["rows"], wifi["rows"]);
+        let empty = StockStatus { settings: Watchlist { symbols: vec![] }, ..snapshot };
+        assert_eq!(wire_snapshot(&empty, &serde_json::json!({"widgetWifiData":"p4-wifi-data-v1"}))
+            .unwrap()["deviceWatchlist"], serde_json::json!([]));
+    }
+
     #[test]
     fn two_second_refresh_keeps_bounded_error_backoff() {
         assert_eq!(INTERVAL_MS, 2_000);

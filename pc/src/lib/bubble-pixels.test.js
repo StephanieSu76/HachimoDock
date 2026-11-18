@@ -160,7 +160,7 @@ test('async raster stale completion never invokes native, and deadline never sel
 
 test('a native-ready failure disposes the listener, and stop is idempotent',async()=>{
   let cleaned=false;
-  await assert.rejects(startBubblePixelService({instance:INSTANCE,
+  await assert.rejects(startBubblePixelService({instance:INSTANCE, render:async()=>({}),
     listen:async()=>()=>{cleaned=true;},invoke:async()=>{throw Error('unavailable');}}));
   assert(cleaned);const f=await fixture();f.stop();f.stop();await new Promise(r=>setTimeout(r,1));
   assert.equal(f.ready.filter(x=>x.ready===false).length,1);
@@ -189,5 +189,57 @@ test('unknown asset and invalid requested pages never raster or submit',async()=
     const unknown=event('body');unknown.payload.need={style:4,id:'f'.repeat(16),page:0};f.emit(unknown);
     const page=event('body');page.payload.need={style:4,id:bubblePixelKey(4,'body'),page:1};f.emit(page);
     await new Promise(r=>setTimeout(r,10));assert.equal(f.sent.length,0);
+  }finally{f.stop();}
+});
+
+test('session prefetch prioritizes selected title/body and stays within six slots',()=>{
+  const sessions=Array.from({length:8},(_,i)=>({id:String(i),title:`title-${i}`,content:`body-${i}`}));
+  const requests=collectBubbleTexts('session/current',{sessionId:'4',sessions});
+  assert.deepEqual(requests.slice(0,2),[{style:1,text:'title-4'},{style:4,text:'body-4'}]);
+  assert.equal(requests.length,6);
+  assert(requests.every(r=>r.style===1||r.style===4));
+  assert.deepEqual(new Set(requests.map(r=>r.text)),new Set(['title-3','body-3','title-4','body-4','title-5','body-5']));
+  const deferred=collectBubbleTexts('session/current',{sessionId:'4',sessions},{includeDeferred:true});
+  assert(deferred.some(r=>r.style===3&&r.text==='body-4'));
+});
+
+test('three native session owners send six visible assets without compact cache churn',async()=>{
+  const f=await fixture();
+  try {
+    for(let n=1;n<=3;n++){
+      const e=event('',{owner:String(n).repeat(16)});e.payload.topic='session/current';
+      e.payload.payload={sessionId:String(n),sessions:[{id:String(n),title:`title-${n}`,content:`body-${n}`}]};f.emit(e);
+    }
+    await waitUntil(()=>f.sent.length===6);await new Promise(r=>setTimeout(r,15));
+    assert.equal(f.sent.length,6);assert(f.sent.every(r=>r.style===1||r.style===4));
+    assert.equal(new Set(f.sent.map(r=>r.id)).size,6);
+  }finally{f.stop();}
+});
+
+test('deferred compact need still works with legacy payload and stale versions cannot revive text',async()=>{
+  const f=await fixture();
+  const session=version=>{const e=event('',{version});e.payload.topic='session/current';e.payload.payload={sessionId:'a',sessions:[{id:'a',title:'Title',content:version===1?'Old':'Current'}]};return e;};
+  try{
+    f.emit(session(2));await waitUntil(()=>f.sent.length===2);await new Promise(r=>setTimeout(r,5));
+    const stale=session(1);stale.payload.need={style:3,id:bubblePixelKey(3,'Old'),page:0};f.emit(stale);
+    await new Promise(r=>setTimeout(r,10));assert.equal(f.sent.length,2);
+    const need=session(2);need.payload.need={style:3,id:bubblePixelKey(3,'Current'),page:0};f.emit(need);
+    await waitUntil(()=>f.sent.length===3);assert.equal(f.sent[2].text,'Current');assert.equal(f.sent[2].style,3);
+    assert(f.sent.every(r=>r.version==='0000000000000002'));
+  }finally{f.stop();}
+});
+
+test('conversation title/body precede hints; later subtitle pages are requested only on demand',async()=>{
+  const payload={role:'user',name:'Pet',text:'Long caption'};
+  assert.deepEqual(collectBubbleTexts('ui/conversation',payload),[{style:1,text:'你'},{style:2,text:'Long caption'}]);
+  assert(collectBubbleTexts('ui/conversation',payload,{includeDeferred:true}).some(r=>r.text==='我在听'));
+  const f=await fixture({render:(style,text,_canvas,page=0)=>({style,text,id:bubblePixelKey(style,text),pageIndex:page,pageCount:style===2?16:1})});
+  const e=event('');e.payload.topic='ui/conversation';e.payload.payload=payload;
+  try{
+    f.emit(e);await waitUntil(()=>f.sent.length===2);await new Promise(r=>setTimeout(r,20));
+    assert.equal(f.sent.length,2);assert(f.sent.every(r=>r.pageIndex===0));
+    const need=structuredClone(e);need.payload.need={style:2,id:bubblePixelKey(2,payload.text),page:3};f.emit(need);
+    await waitUntil(()=>f.sent.length===3);assert.equal(f.sent[2].pageIndex,3);
+    await new Promise(r=>setTimeout(r,10));assert.equal(f.sent.length,3);
   }finally{f.stop();}
 });

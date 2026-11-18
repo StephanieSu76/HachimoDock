@@ -9,7 +9,7 @@ import { BUILTIN_TERRIER_APPEARANCE_ID } from "./builtin-appearances.js";
 
 export const AGENT_APPEARANCE_MAP_STORAGE_KEY = "pet-manager.agent-appearance-map";
 export const ENABLED_AGENTS_STORAGE_KEY = "pet-manager.enabled-agents";
-export const DEFAULT_AGENT_ID = "codex";
+export const DEFAULT_AGENT_ID = "workbuddy";
 
 export const FIXED_AGENT_OPTIONS = [
   {
@@ -29,8 +29,8 @@ export const FIXED_AGENT_OPTIONS = [
   },
   {
     id: "mimocode",
-    label: "MiMoCode",
-    detail: "MiMoCode 本地会话与实时状态渠道",
+    label: "MiMo Desktop / MiMoCode",
+    detail: "跟随小米 MiMo 桌面应用和 MiMoCode 的会话状态",
   },
   {
     id: "deepseek-harness",
@@ -46,6 +46,11 @@ export const FIXED_AGENT_OPTIONS = [
     id: "devin",
     label: "Devin",
     detail: "Devin 云端会话状态与气泡；向 Devin Desktop 当前对话追加语音草稿",
+  },
+  {
+    id: "hermes",
+    label: "Hermes Agent",
+    detail: "跟随 Hermes 本地会话状态",
   },
 ];
 

@@ -133,7 +133,7 @@ int main(int argc,char **argv){
   * selector, NOT the failed API result/RAM catalog to infer durable outcome. */
  work_current=true;catalog_fault=0;
  miniapp_catalog_snapshot_t a={0},b={0};uint32_t sequence=0;
- (void)load_catalog_snapshot(0,&a,NULL);(void)load_catalog_snapshot(1,&b,NULL);
+ (void)load_catalog_snapshot(0,&a);(void)load_catalog_snapshot(1,&b);
  miniapp_catalog_snapshot_t *picked=catalog_latest_snapshot(&a,&b,&sequence);
  assert(picked&&sequence>=20&&sequence<=21);
  /* Fault5 now fails the initial truncate0: no new JSON was written.

@@ -1,3 +1,5 @@
+#include "pet_p4_boot_memory.h"
+#include "pet_p4_protocol_budget.h"
 /*
  * [Input] diagnostics/recovery topics, runtime state, and persistent boot data.
  * [Output] bounded health/session-retention snapshots including stable queue
@@ -7,6 +9,8 @@
  */
 
 #include "pet_p4_diagnostics.h"
+#include "pet_p4_device_wifi.h"
+#include "bsp/display.h"
 
 #include <stdio.h>
 #include <stdatomic.h>
@@ -29,6 +33,7 @@
 #include "pet_p4_build_info.h"
 #include "pet_p4_input.h"
 #include "pet_p4_miniapp.h"
+#include "pet_p4_wasm_trial.h"
 #include "pet_p4_ota.h"
 #include "pet_p4_touch.h"
 #include "pet_p4_renderer.h"
@@ -88,6 +93,47 @@ void pet_p4_diagnostics_storage_refresh(void){
     sampled_ms,sampled>=0?result:ESP_ERR_INVALID_STATE);
   portEXIT_CRITICAL(&g_storage_snapshot_mux);
 #endif
+}
+
+static portMUX_TYPE g_boot_memory_lock = portMUX_INITIALIZER_UNLOCKED;
+static pet_boot_memory_trace_t g_boot_memory;
+
+void pet_p4_boot_memory_checkpoint(pet_boot_stage_t stage) {
+  pet_boot_memory_sample_t sample = {
+    .uptime_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+    .free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+    .minimum_internal = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+    .largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+    .free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+  };
+  portENTER_CRITICAL(&g_boot_memory_lock);
+  (void)pet_boot_memory_record(&g_boot_memory, stage, sample);
+  portEXIT_CRITICAL(&g_boot_memory_lock);
+}
+
+static void add_boot_memory(cJSON *payload) {
+  static const char *const names[PET_MEMORY_BOOT_STAGE_COUNT] = {
+    "entry", "storage", "catalog", "builtins", "manifest", "transport",
+    "display", "audio", "first_frame", "rx_tasks", "afe", "ready"
+  };
+  cJSON *stages = cJSON_AddArrayToObject(payload, "bootMemory");
+  if (!stages) return;
+  for (unsigned i = 0; i < PET_MEMORY_BOOT_STAGE_COUNT; ++i) {
+    portENTER_CRITICAL(&g_boot_memory_lock);
+    bool recorded = (g_boot_memory.recorded & (1U << i)) != 0;
+    pet_boot_memory_sample_t sample = g_boot_memory.samples[i];
+    portEXIT_CRITICAL(&g_boot_memory_lock);
+    if (!recorded) continue;
+    cJSON *item = cJSON_CreateObject();
+    if (!item) break;
+    cJSON_AddStringToObject(item, "stage", names[i]);
+    cJSON_AddNumberToObject(item, "uptimeMs", sample.uptime_ms);
+    cJSON_AddNumberToObject(item, "freeInternalBytes", sample.free_internal);
+    cJSON_AddNumberToObject(item, "minimumFreeInternalBytes", sample.minimum_internal);
+    cJSON_AddNumberToObject(item, "largestInternalBlockBytes", sample.largest_internal);
+    cJSON_AddNumberToObject(item, "freePsramBytes", sample.free_psram);
+    cJSON_AddItemToArray(stages, item);
+  }
 }
 
 static const char *reset_reason_name(esp_reset_reason_t reason) {
@@ -230,6 +276,7 @@ static char *prepare_status(
   cJSON_AddStringToObject(payload, "boardDeviceId", state ? state->board_device_id : "");
   cJSON_AddNumberToObject(payload, "bootCount", g_boot_record.boot_count);
   cJSON_AddNumberToObject(payload, "faultResetCount", g_boot_record.fault_reset_count);
+  pet_p4_wasm_trial_diagnostics(payload);
   cJSON_AddNumberToObject(payload, "lastResetReasonCode", g_boot_record.last_reset_reason);
   cJSON_AddNumberToObject(payload, "lastResetRawReasonCpu0", g_raw_reset_reason[0]);
   cJSON_AddNumberToObject(payload, "lastResetRawReasonCpu1", g_raw_reset_reason[1]);
@@ -332,6 +379,7 @@ static char *prepare_status(
     reset_reason_is_fault((esp_reset_reason_t) g_boot_record.last_reset_reason)
   );
 
+  const pet_render_cache_memory_t cache_before = pet_p4_renderer_cache_memory();
   cJSON_AddNumberToObject(memory, "freeHeapBytes", esp_get_free_heap_size());
   cJSON_AddNumberToObject(memory, "minimumFreeHeapBytes", esp_get_minimum_free_heap_size());
   cJSON_AddNumberToObject(memory, "freePsramBytes", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -346,7 +394,31 @@ static char *prepare_status(
     "minimumFreePsramBytes",
     heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM)
   );
+  const pet_render_cache_memory_t cache_after = pet_p4_renderer_cache_memory();
   cJSON_AddItemToObject(payload, "memory", memory);
+  cJSON *cache = cJSON_AddObjectToObject(payload, "renderCache");
+  cJSON_AddNumberToObject(cache, "streamBytes", cache_after.stream_bytes);
+  cJSON_AddNumberToObject(cache, "workStreamBytes", cache_after.work_stream_bytes);
+  cJSON_AddNumberToObject(cache, "streamSlots", cache_after.stream_slots);
+  cJSON_AddNumberToObject(cache, "generation", cache_after.generation);
+  cJSON_AddBoolToObject(cache, "stableDuringMemorySample",
+    pet_render_cache_memory_stable(cache_before, cache_after));
+
+  if (request && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(request, "includeBootMemory")))
+    add_boot_memory(payload);
+  pet_protocol_budget_t budget = pet_p4_protocol_budget_snapshot();
+  cJSON *protocol_memory = cJSON_AddObjectToObject(payload, "protocolMemory");
+  if (protocol_memory) {
+    cJSON_AddNumberToObject(protocol_memory, "pendingBytes", budget.bytes);
+    cJSON_AddNumberToObject(protocol_memory, "peakPendingBytes", budget.peak_bytes);
+    cJSON_AddNumberToObject(protocol_memory, "limitBytes", PET_PROTOCOL_PENDING_BYTES);
+    cJSON_AddNumberToObject(protocol_memory, "smallRequestReserveBytes", PET_PROTOCOL_SMALL_RESERVE);
+    cJSON_AddNumberToObject(protocol_memory, "budgetRejected", budget.rejected);
+    cJSON_AddNumberToObject(protocol_memory, "allocationFailures", budget.allocation_failures);
+    cJSON_AddNumberToObject(protocol_memory, "queueFull", budget.queue_full);
+    cJSON_AddNumberToObject(protocol_memory, "maxQueueWaitUs", budget.max_wait_us);
+    cJSON_AddNumberToObject(protocol_memory, "maxHandleUs", budget.max_handle_us);
+  }
 
   cJSON_AddNumberToObject(storage, "totalBytes", (double) storage_total);
   cJSON_AddNumberToObject(storage, "usedBytes", (double) storage_used);
@@ -374,6 +446,7 @@ static char *prepare_status(
     cJSON_AddNumberToObject(lookup,"negativeWallUs",(double)hint.negative_us);
     cJSON_AddNumberToObject(lookup,"errorWallUs",(double)hint.error_us);
     cJSON_AddNumberToObject(lookup,"maximumWallUs",hint.maximum_us);
+    cJSON_AddNumberToObject(lookup,"catalogPrimeWallUs",hint.catalog_prime_us);
     cJSON_AddItemToObject(storage,"lookupHint",lookup);
   }
 #endif
@@ -391,6 +464,10 @@ static char *prepare_status(
   if(save_stack&&!cJSON_AddItemToObject(runtime,"saveWorkerStack",save_stack))cJSON_Delete(save_stack);
 #endif
   pet_p4_render_metrics_t render = pet_p4_renderer_metrics();
+  cJSON_AddNumberToObject(runtime, "lcdDsiLanes", BSP_LCD_MIPI_DSI_LANE_NUM);
+  cJSON_AddNumberToObject(runtime, "lcdDsiLaneMbps", BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS);
+  cJSON_AddNumberToObject(runtime, "lcdPixelClockMHz", BSP_LCD_DPI_CLOCK_MHZ);
+  cJSON_AddNumberToObject(runtime, "renderTargetIntervalMs", CONFIG_PET_P4_MAIN_RENDER_INTERVAL_MS);
   cJSON_AddNumberToObject(runtime, "renderLastUs", render.last_us);
   cJSON_AddNumberToObject(runtime, "renderP95Us", render.p95_us);
   cJSON_AddNumberToObject(runtime, "renderMaxUs", render.max_us);
@@ -756,6 +833,24 @@ esp_err_t pet_p4_diagnostics_init(void) {
   return err;
 }
 
+static bool schedule_reboot_locked(const pet_p4_runtime_state_t *state) {
+  if (pet_p4_ota_active() || (state && state->asset_transfer_active)) return false;
+  if (!g_reboot_at_ms) {
+    atomic_store_explicit(&g_reboot_pending, true, memory_order_release);
+    g_reboot_at_ms = (unsigned long long)(esp_timer_get_time() / 1000ULL)
+      + PET_P4_DIAGNOSTICS_REBOOT_DELAY_MS;
+  }
+  return true;
+}
+
+bool pet_p4_diagnostics_schedule_reboot(const pet_p4_runtime_state_t *state) {
+  if (!g_diagnostics_mutex || xSemaphoreTake(g_diagnostics_mutex, portMAX_DELAY) != pdTRUE)
+    return false;
+  const bool accepted = schedule_reboot_locked(state);
+  xSemaphoreGive(g_diagnostics_mutex);
+  return accepted;
+}
+
 bool pet_p4_diagnostics_handle_topic_with_reply(
   const char *topic,
   const cJSON *payload,
@@ -813,21 +908,9 @@ bool pet_p4_diagnostics_handle_topic_with_reply(
       err == ESP_OK ? "input bindings restored to safe defaults" : esp_err_to_name(err)
     );
   } else if (strcmp(topic, "system/reboot") == 0) {
-    if (pet_p4_ota_active() || (state && state->asset_transfer_active)) {
-      send_action(
-        payload,
-        send_line,
-        ctx,
-        "reboot",
-        false,
-        "device transfer is active; reboot was not scheduled"
-      );
-    } else {
-      atomic_store_explicit(&g_reboot_pending, true, memory_order_release);
-      send_action(payload, send_line, ctx, "reboot", true, "device reboot scheduled");
-      g_reboot_at_ms = (unsigned long long) (esp_timer_get_time() / 1000ULL)
-        + PET_P4_DIAGNOSTICS_REBOOT_DELAY_MS;
-    }
+    const bool accepted = schedule_reboot_locked(state);
+    send_action(payload, send_line, ctx, "reboot", accepted, accepted
+      ? "device reboot scheduled" : "device transfer is active; reboot was not scheduled");
   } else {
     handled = false;
   }
@@ -858,7 +941,11 @@ void pet_p4_diagnostics_process(
   }
   xSemaphoreGive(g_diagnostics_mutex);
   if (!restart) return;
-  if (pet_p4_ota_active() || (state && state->asset_transfer_active)) {
+  if (pet_p4_ota_active() || (state && state->asset_transfer_active)
+#if PET_P4_SYSTEM_WIFI
+      || !pet_device_wifi_prepare_reboot()
+#endif
+      ) {
     if (xSemaphoreTake(g_diagnostics_mutex, portMAX_DELAY) == pdTRUE) {
       g_reboot_at_ms = now_ms + PET_P4_DIAGNOSTICS_REBOOT_DELAY_MS;
       xSemaphoreGive(g_diagnostics_mutex);

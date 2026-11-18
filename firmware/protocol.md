@@ -631,6 +631,21 @@ Firmware 0.7.51 reports the actual silicon revision as an integer
 The desktop selects the v1 or v3 application image from these values. Both host
 operating systems use the same 4M transport and existing chunk/pacing rules.
 
+`capabilities.firmwareUpdate.hardwareBoardModel` reports `pico` or `wifi6`
+when the factory NVS record matches the device ID derived from its base MAC.
+Without a factory record, the first USB binding schedules one bounded,
+low-priority command-only SDIO probe on the Waveshare Wi-Fi 6 board wiring
+after the initial HELLO. The upgrade UI waits for the updated HELLO when
+`hardwareBoardProbe` is `pending`, with a bounded fallback.
+An accepted ESP-Hosted CIS identity
+reports `wifi6`; a missing or invalid response leaves the model unreported.
+The `hardwareBoardSource` values are `factory` and `hosted-sdio`.
+The separate `boardModel` field describes the running image. Factory
+operators can use `build_factory_image.py --verified-board-model`,
+`--verified-device-id`, and `--nvs-generator` together after identifying the
+physical board and its device ID. This produces a unit-specific factory image.
+Ordinary OTA and client board selection do not populate the factory record.
+
 `firmware/begin` may include `chipRevisionMin` and `chipRevisionMax`. The device
 checks them before opening the OTA partition, then independently validates the
 first application's ESP image header before writing. Images must explicitly
@@ -1020,6 +1035,11 @@ PC to board:
   Other unmapped system-navigation actions such as `component_center` are
   acknowledged as disabled instead of falling through and closing the
   component. Outside a component, those global actions keep their normal role.
+- Devices advertising `inputDoublePress: true` accept `button.sw1.double_press`,
+  `button.sw2.double_press`, and `button.sw3.double_press` in board and component
+  button maps. A mapped double press consumes both short presses within 280 ms.
+  Unmapped keys have no additional delay. Component press/hold and global exit
+  take priority, and the device cancels pending clicks on input-context changes.
 - `input/config-query`: returns the complete authoritative input map on
   `input/config-state`, correlated by `requestId`.
 - Input configuration and component inventory requests keep their large
@@ -1059,6 +1079,63 @@ PC to board:
   part of the same snapshot, so install, delete, and selection never expose a
   mixed widget/buttons/catalog/active-id state. Commit may take several seconds
   when SPIFFS garbage collection is active; firmware yields between writes.
+  WASM packages that import `hachi.canvas640` declare
+  `hachiCanvas: "640x480-v1"` in `runtime/widget.json`. This declaration
+  must match the module. Devices advertising `widgetWasmCanvas: "640x480-v1"`
+  render these modules at 640×480 and deliver touch in the same coordinates.
+  The `hachi.text` import is available only to this profile, in the frame
+  callback, with bounded single-line UTF-8, coordinates, size, and per-frame
+  work. Legacy WASM modules retain the 320×240 coordinate system.
+  Imports `hachi.clock_read`, `hachi.uv_read`, and `hachi.random_u32`
+  require `runtime/widget.json.hachiHost="hachi-host-v1"` and device
+  capability `widgetWasmHost="hachi-host-v1"`. The manifest and module must
+  agree. On capable devices, heartbeat `clock.subsecondMs` supplements
+  `unixSeconds` and `utcOffsetMinutes` with an integer in the range 0–999.
+  A heartbeat with `wasmUv` can carry `null` (clear) or
+  `{sampleSeconds,indexCenti}` (UTC sample time and UV index in hundredths).
+  The device responds with `wasm/uv_request` while the visible guest is
+  actively reading UV; Pet Manager uses the verified connection as the
+  request owner. Time and UV snapshots have no persistent device storage.
+- `widgetWasmMaxBytes` and `widgetWasmMemoryPages` advertise the device's WASM
+  file and fixed memory budgets. An absent field means 65,536 bytes or two
+  memory pages, respectively. New targets support up to 196,608 file bytes
+  subject to their shared component resource capacity, and fixed two- or
+  four-page memory. A single sprite remains bounded to 65,536 bytes.
+
+When hello advertises `widgetTransfer: p4-widget-files-v2`, desktop installs can opt in
+with `transferProtocol`, `packageSha256`, `fileCount`, and `totalBytes` on
+`widget/begin`. The manifest digest covers each nonempty file in ascending UTF-8
+path order, encoded as path bytes, a NUL, a little-endian u32 byte length, and raw
+file bytes. The manifest is limited to 128 files and 16 MiB. Existing per-resource
+runtime and staging quotas still apply.
+
+Every `widget/chunk` carries at most 4096 decoded bytes plus the existing chunk
+checksum and `fileIndex`, `fileBytes`, `offset`, and global `sequence`. All indexes
+start at zero. Nonfinal chunks carry exactly 4096 bytes. `widget/status` echoes
+the request's numeric `index` and reports `missing`, `busy`, `pending` with
+`nextSequence`, or `committed` for the exact transfer ID and package digest. The
+client queries after an uncertain write and only sends the next block confirmed
+by the device. A reconnect can resume while the firmware is still running.
+A firmware reboot clears the staging cursor and the volatile commit receipt.
+
+`widget/commit` repeats `packageSha256`. The firmware checks the complete manifest
+before entering the existing atomic storage commit. Firmware that advertises
+`widgetResourceOrder: p4-widget-resource-id-v1` maps received resources by ID
+and persists them in declaration order, including additional JPEG keyframes.
+For older v2 firmware, the client uses the legacy ordered transfer when wire
+sorting would change image or sprite order. The old catalog and installed
+generation remain usable until that commit. Legacy installs and resource repairs
+keep the original envelope and uncertain-write behavior.
+
+  With `capabilities.widgetCenterTitle="rle4-v1"`, Pet Manager may add
+  `runtime/center-title.rle` to the same transaction. The file contains the
+  UTF-8 catalog title (up to 63 bytes), a NUL, then a little-endian width,
+  a one-byte height of 33, and up to 6141 bytes of the bubble RLE4 alpha
+  stream. The width is 4–252 pixels. Firmware accepts the mask only when
+  the title matches the parsed catalog title and the runs cover the exact
+  rectangle. It saves the mask with the package generation and checks its
+  catalog checksum before drawing. A missing or invalid mask falls back
+  to the built-in title rendering.
   For the built-in `token-usage` package only, Pet Manager removes its Linux host
   reader/fetcher declarations before transfer. Firmware then updates its four
   declared display variables from the validated bounded stats model; arbitrary
@@ -1225,17 +1302,17 @@ normal rendering. The board keeps the committed runtime alive for 5 seconds
 before restart, leaving enough time for the desktop's 3-second commit timeout
 and one idempotent retry to receive the cached commit result.
 
-The A/B application image contains a bounded, compressed bootstrap catalog.
-Complete artwork belongs to factory/PC resource packages, not duplicated OTA slots.
-`pet_p4_miniapp_sync_builtins` adds missing entries, never downgrades an existing
-complete artwork package to a bootstrap, removes retired entries, and restores
-the active id (otherwise the first visible entry). The unreleased canonical list
-in `factory-config.json` has 26 entries, with `daily-news` fifth and `city-radio`
-first. User-created packages remain ahead of firmware defaults; later installs
-prepend normally. `two-key-pong` and `bloomfrog_companion` remain available.
-Migration reorders catalog records without moving slots or saved data. A build-id
-and bundle-checksum marker is written only after successful completion; an
-interrupted migration retries on the next boot. Component ids outside the firmware-owned list are preserved.
+R195 的默认组件名单由 `factory-config.json` 维护。设备出厂包含 28 项；桌面安装包包含 27 项，`bloomfrog_companion` 仅随设备出厂资源提供。
+中国象棋、2046 和模拟琴键的 WASM 模块随固件压缩携带，首启时由原有组件事务写入并校验；
+出厂 SPIFFS 也预置相同模块。普通组件的完整美术资源仍由出厂或桌面资源提供。
+既有目录升级时保留安装记录、用户修订和存档。OTA 不自动补装用户目录中缺失的组件，
+也不把完整资源降级成引导资源。首启中断时按目录事务重新尝试。
+Component ids outside the firmware-owned list are preserved. User-created packages and their saves are retained.
+
+设备组件中心提供「全部」「小游戏」「小工具」「影音」。触屏点击标签，或长按摇杆
+中键循环切换（中键长按未另行绑定时）。影音包括电台、声景及阅读播报。切换只影响
+设备列表，不改变 USB 组件清单、安装记录或全局退出动作。
+
 Use `tools/read_component_inventory.py` only with an idle serial port to compare
 the actual installed inventory; a bundled count does not prove installation.
 
@@ -1244,6 +1321,23 @@ OTA commit or diagnostic reboot is pending, new asset/native transfers are
 rejected until the board restarts. Boot validation samples LCD/render and both
 transport RX tasks independently of asset rendering, so a long asset transfer
 cannot accidentally starve the health window or mark a bad image healthy.
+
+## Bluetooth Keyboard Configuration
+
+WiFi6 publishes `bluetoothKeyboardConfig: "p4-ble-keyboard-config-v1"`.
+Use USB `keyboard/config` with a correlated `requestId` to read state.
+Send `enabled` to change mode, or send one `slot` and `chord` to store a mapping.
+The `keyboard/config-state` response contains the board identity, mode, bonded
+and connected state, pairing state, and the stored chord values in a 20-slot array. A zero chord
+clears a slot. A nonzero chord encodes the keyboard modifier bits in the upper
+byte and the standard keyboard HID usage in the lower byte.
+
+Slots 0–8 represent SW1, SW2, and SW3, each in single, double, long order.
+Slots 9 and 11 map short and long joystick center presses.
+Slots 12, 14, 16, and 18 map up, down, left, and right. Slots 10, 13, 15, 17,
+and 19 are reserved and read back as zero. The device waits up to 280 ms
+for a second button press when a double is mapped. Authenticated Bluetooth HID connection and enabled mode together
+give Bluetooth ownership of the physical controls.
 
 ## Hardware Input Configuration
 
@@ -2266,6 +2360,8 @@ Original program750us, frame/gap66667us and SAVE4096/free1024 gates remain.
 
 ## 设备总音量与数据过期清空
 
+设备未保存总音量时默认使用 80%。启动时优先恢复已保存的有效音量，包括用户保存的 0% 静音。应用默认值无需写入 NVS。
+
 `hello.capabilities.audioMasterVolume = "p4-master-volume-v1"` 表示支持设备扬声器总音量。请求 topic 为 `audio/volume`，payload 包含 `operation:"query"|"set"`、`requestId`、`expectedBoardDeviceId`；仅 set 可包含整数 `volume`（0–100，0 为硬件 DAC 静音）。回执 topic 为 `audio/volume-state`，包含真实设备 `boardDeviceId`、原 `requestId`、`engine`、布尔 `ok`、实际 `volume`（无法确认时 null）、布尔 `persisted`、`savePending`。硬件确认不等于 NVS 保存完成，读取不能重放设置或触发保存。客户端必须绑定 USB 连接代次，结果未知时先只读核对。
 
 `hello.capabilities.widgetDataExpiry = "p4-data-expiry-v1"` 与 `widgetDataSources:8` 声明有界快照能力。`widget/data` 可选严格布尔字段 `clearOnExpire`，默认 false 保持兼容；true 时 TTL 到期或时间回退会清空 view 中的旧行、日期和消息，并禁止选择过期行。PC 的共享城市源 `location.current` 使用此选项；行数、字段长度及现有内存/耗时验收门槛不变。
@@ -2343,3 +2439,88 @@ The original before/after epoch/revision/lease checks still gate the response.
 
 `globalAudioCues: "p4-global-audio-cues-v1"` 表示支持跨形象共用的提示音设置。
 音频专用 `asset/audio-*` 请求增加 `scope: "global"`。请求仍绑定当前设备、启动身份、当前物理形象槽及其 packId，以验证传输权限；持久化身份独立于视频包和形象槽。每阶段必须保持 scope 一致。仅 WAV 数据进入独立音频双银行，提交后对所有形象生效，空集合提交恢复默认提示音。上传、删除和下发均不准备、重传、清空或激活视频。旧 `p4-audio-patch-v1` 保留兼容，新的客户端要求全局能力后才下发全局音效，不回退到完整形象同步。
+
+The ESP-SR WebRTC NS allocation debug print is suppressed at the firmware link boundary. Its direct console write could interrupt the shared UART audio stream during duplex setup. Frame checksums, sequence checks and DSP protection are unchanged.
+
+按键录音期间，首个 PCM 分片发出后才允许已缓存的 H.264 动画继续解码，最多每 125 ms 提交一次解码。录音启动、实时对话的 AEC 准备和文件读取仍按原互斥规则处理。
+
+## WiFi6 设备系统设置
+
+实验构建 `esp32_p4_wifi6_system_settings_v1` / `esp32_p4_wifi6_system_settings_v3` 在确认 WiFi6 板型后声明
+`capabilities.systemSettings: true` 和 `screenPages` 项 `settings`。客户端可将 `system_settings` 写入
+现有的全局按键配置，不改变出厂按键映射。宠物首页和组件列表均可通过已配置的按键进入系统设置。
+组件中心的数量标记左侧也提供「设置」触控入口。返回时回到原页面。
+设置内触屏和摇杆直接操作。摇杆中按或 SW1 确认，摇杆中按长按或 SW3 返回。
+系统设置不作为 USB `screen/page` 的远程导航目标。
+
+WIFI配置用 C6 后台扫描并连接附近网络。设备获得 IP 后才保存网络，连接失败会尝试恢复原已保存网络。
+Wi-Fi 密码只进入本机键盘、连接任务与设备 NVS，不进入画面快照、按键事件、组件或桌面协议。
+该实验构建仍使用现有设备的 NVS 安全配置，未额外启用 Flash 或 NVS 加密。
+
+WiFi6 设备获得 IP 后，后台通过 SNTP 校准 UTC。组件时钟优先使用近期的桌面时钟同步，
+桌面心跳停止后可继续使用网络时钟。时区沿用设备保存的最近桌面 UTC 偏移，初次未同步偏移时按 UTC 显示。
+已确认的 WiFi6 设备声明 `capabilities.wifiStatus`，可通过 USB 发送 `wifi/query` 并读取 `wifi/status`。
+查询返回 Wi‑Fi 是否已获得 IP、网络校时是否成功及校准时长，随请求回传 `requestId`，无需打开设置页面。
+
+
+On Wi-Fi 6 targets, `wifi/status` reports the Hosted INIT chip ID
+(`radioChipId`), whether automatic dual band was enabled
+(`radioDualBand`), its RPC result (`radioBandModeError`), and the connected
+AP channel (`connectedChannel`, zero when offline).
+
+Devices advertising `bluetoothKeyboardExtendedChords: true` accept a full
+HID modifier byte in the high eight bits of `keyboard/config.chord`.
+Usage zero with a nonzero modifier byte sends only those modifiers.
+An all-zero chord still clears the slot. Existing left-side modifier
+bindings retain their encoded values.
+
+Paired Wi-Fi keyboard configuration uses authenticated LAN mode 15. The
+body contains the current 16-byte ASCII boot ID followed by the same JSON
+payload as `keyboard/config` (at most 64 bytes). The sealed reply contains
+the `keyboard/config-state` payload or a single zero byte on rejection.
+USB takes priority and the LAN request runs on the serialized device
+control worker.
+
+`diagnostics/status.runtime` reports configured `lcdDsiLanes`,
+`lcdDsiLaneMbps` (per lane), `lcdPixelClockMHz`, and
+`renderTargetIntervalMs` for normal rendering. Use deltas of
+`renderSubmittedFrames` and `uptimeMs` to measure application frame submission.
+These fields do not establish that a physical panel supports the selected profile.
+
+## Paired LAN realtime key (rtcKey)
+
+Authenticated device status adds optional numeric `rtcKey`: bit 0 announces the
+realtime physical-key mailbox, bit 1 says a desktop USB session has priority,
+and bit 2 announces conversation HUD support on the RTC stream. Missing means
+unsupported. Legacy mode 0 (empty request and empty authenticated response) is
+unchanged. Pico builds do not compile the LAN producer or mailbox.
+
+Mode 16 uses the existing P4LAN1 authentication/GCM envelope. The request is
+exactly 36 bytes: boot ID (16 ASCII hex), desktop-process receiver nonce (16
+nonzero random bytes), accepted sequence (u32 BE; zero means peek). A successful
+response has its existing authenticated length prefix and exactly 12 bytes:
+owned (u8), context (0 main / 1 app / 2 components), remaining TTL (u16 BE),
+head sequence (u32 BE; zero means empty), last accepted ACK (u32 BE). A denial is
+12 zero bytes. The nonce is an opaque lease discriminator, not a credential.
+
+Only a paired, control-trusted, online peer without USB priority can acquire a
+six-second receiver lease. Polls refresh client liveness. Four events maximum,
+three-second TTL from the original debounced input timestamp (never dispatch time),
+rejecting future timestamps, expired queued input and input predating the receiver lease;
+monotonic sequence within boot; overflow
+and sequence exhaustion refuse new events. Peek never dequeues, including on
+failed response writes. Only the current receiver's exact, live head ACK pops;
+repeating that ACK cannot pop the next event. New leases do not inherit events.
+
+PC emission to a webview is only an offer. `lan_realtime_toggle` is the explicit
+frontend acceptance, validates pairing/board/boot and USB priority again, and
+ACKs before dispatch. Idle starts first resolve current appearance/configuration;
+stops need no persona lookup. Original TTL is never extended by retries. Native
+and frontend dedup prevent repeated offers from toggling twice; final start/stop
+are bound to the same Wi-Fi boot and cannot target a successor USB session.
+No identities, pairing material, transcripts or PCM are added to logs.
+
+LAN status encoding/PC receive capacity is 576 bytes in this revision, reusing
+the existing 16 KiB transport scratch buffers. The current R284 status payload
+still fits an older PC's 512-byte receive bound; the larger limit allows future
+31-byte descriptor versions and maximal counters plus cJSON print slack.

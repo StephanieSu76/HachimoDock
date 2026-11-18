@@ -1,11 +1,10 @@
-# 通用服务桥（候选、默认关闭）
+# 通用服务桥（按固件能力协商）
 
 本参考对应 `pc-service-bridge-v1` / `p4-service-bridge-v1` 候选代码及
 `contracts/service-bridge-v1.json`。协议可表达、离线校验、完整固件编译与实机验收
 是不同状态；本参考不证明普通固件已开放或任何提供器已通过 HIL。
-`PET_SERVICE_BRIDGE_ENABLED` 缺省为 0，仅独立
-`esp32_p4_service_bridge_candidate` 显式开启，并启用其集合依赖。
-不由 r157、客户端版本、PC 预览或包内声明推断设备支持。
+`PET_SERVICE_BRIDGE_ENABLED` 由构建目标配置；启用的目标还需带上集合依赖。
+始终按当前连接设备的握手能力判断可用性。
 
 ## 路由与显式协商
 
@@ -98,6 +97,8 @@ MIME 必须与真实 PNG/JPEG 格式匹配，不能由 MIME 启用其他解码�
 只在完整传输后切换，音频传输优先；既有图形/包体预算不放宽。
 
 ## 本地媒体、权限与验收边界
+
+新建本地播放器时，使用 PC 声明中的 `kind: "local-media"`。旧 `media.source: "audio.player"` 是已停用的播放器接口，仅用于识别历史包。新打包会拒绝旧接口；历史包仍可导入和查看，并标明迁移原因。合法服务桥包可离线打包和导入，正式同步前由客户端核对实际 USB 握手与包声明的依赖。
 
 `kind:"local-media"` 复用原播放器核心，但旧全局 `music_player::AVAILABLE=false`
 保持；不重新开放旧在线歌曲服务。只能由用户在 PC 明确选择本地文件导入，包、设备

@@ -1,3 +1,4 @@
+#include "pet_p4_text_alpha.h"
 /*
  * Optional alpha assets: latest text is authoritative, never held for pixels. One
  * route/client/boot-owned stage; whole-asset scheduling is host-owned. Cache mutex protects
@@ -34,15 +35,21 @@ typedef struct {
   uint64_t        key;
   unsigned        style;
 } desired_asset_t;
+/* One owner can advertise more than the original four assets: title, body,
+ * compact body, compact title and the conversation status hints all belong to
+ * the same owner. The old cap invalidated the whole manifest, so every host
+ * frame was rejected as stale_content and bubbles stayed on local glyphs. */
+#define DESIRED_ASSETS_PER_OWNER 12U
 typedef struct {
   uint64_t        owner, version, scope;
-  desired_asset_t assets[4];
+  desired_asset_t assets[DESIRED_ASSETS_PER_OWNER];
   unsigned        asset_count;
 } desired_t;
 typedef struct {
   uint64_t        owner, target, since_ms, seen_ms, title_key, body_key;
   unsigned        style;
   bool            occupied;
+  uint8_t         body_page;
 } text_view_t;
 static text_image_t cache[CACHE_SLOTS], staging;
 static desired_t desired[VIEW_SLOTS];
@@ -57,6 +64,11 @@ static uint32_t lifecycle_epoch;
 typedef struct {
   uint64_t        key;
   unsigned        style, page;
+  /* The exact text the renderer is drawing. The host derives its own text set
+   * per topic, and any drift there made the pixel key unmatchable, so the device
+   * sends the content it actually needs rendered. */
+  char            text[512];
+  uint64_t        owner, version;
 } need_t;
 static need_t needs[8];
 static unsigned need_count;
@@ -80,6 +92,20 @@ static uint64_t hash_bytes(uint64_t hash, const char *s){
     hash = (hash ^ *p) * UINT64_C(1099511628211);
   return hash;
 }
+/* Match the host's UTF-8 limits without changing the fallback text. */
+static void copy_key_text(char *out, const char *text, size_t limit) {
+  size_t len = 0;
+  if (text) {
+    while (len < limit && text[len]) len++;
+    while (len > 0 && ((unsigned char) text[len] & 0xC0) == 0x80) len--;
+    memcpy(out, text, len);
+  }
+  out[len] = 0;
+}
+static size_t body_key_limit(unsigned style) {
+  return style == PET_BUBBLE_BODY_CLIPPED ? 383 : 511;
+}
+
 static uint64_t text_key(unsigned style, const char *text){
   uint64_t        h = hash_bytes(UINT64_C(14695981039346656037), SCHEMA);
   return hash_bytes((h ^ style) * UINT64_C(1099511628211), text);
@@ -163,7 +189,11 @@ pinned(const text_image_t * image)
     const           text_view_t *v = &views[i];
     if (!v->occupied || cache_now_ms < v->seen_ms || cache_now_ms - v->seen_ms > 5000)
       continue;
-    if ((image->style == 1 && image->key == v->title_key) || (image->style == v->style && image->key == v->body_key))
+    /* Keep the initial selection page and the requested page, not an entire
+     * caption. Readers independently protect an in-flight immutable draw. */
+    if ((image->style == 1 && image->key == v->title_key)
+        || (image->style == v->style && image->key == v->body_key
+            && (image->page == 0 || image->page == v->body_page)))
       return true;
   }
   return false;
@@ -178,16 +208,26 @@ oldest(void)
   return n;
 }
 static void
-missing(uint64_t key, unsigned style, unsigned page)
+missing(uint64_t key, unsigned style, unsigned page, const char *text)
 {
   if (blocked || !client[0] || need_count >= 8)
     return;
   for (unsigned i = 0; i < need_count; i++)
     if (needs[i].key == key && needs[i].style == style && needs[i].page == page)
       return;
-  needs[need_count++] = (need_t) {
-    key, style, page
-  };
+  need_t *slot = &needs[need_count++];
+  *slot = (need_t) {0};
+  slot->key = key;
+  slot->style = style;
+  slot->page = page;
+  /* owner/version let the host send a frame the device will still accept. */
+  for (unsigned i = 0; i < desired_count; i++)
+    for (unsigned k = 0; k < desired[i].asset_count; k++)
+      if (desired[i].assets[k].key == key && desired[i].assets[k].style == style) {
+        slot->owner = desired[i].owner;
+        slot->version = desired[i].version;
+      }
+  snprintf(slot->text, sizeof(slot->text), "%s", text ? text : "");
 }
 /* One small coalesced notice per second, outside the cache lock/renderer. */
 bool
@@ -206,6 +246,9 @@ pet_bubble_pixels_next_need(uint64_t now, pet_bubble_need_t * out)
     if (find(n.key, n.style, n.page) >= 0)
       continue;
     snprintf(out->id, sizeof(out->id), "%016" PRIx64, n.key);
+    snprintf(out->owner, sizeof(out->owner), "%016" PRIx64, n.owner);
+    snprintf(out->version, sizeof(out->version), "%016" PRIx64, n.version);
+    snprintf(out->text, sizeof(out->text), "%s", n.text);
     snprintf(out->boot, sizeof(out->boot), "%s", boot);
     snprintf(out->client, sizeof(out->client), "%s", client);
     out->style = n.style;
@@ -273,7 +316,7 @@ pet_bubble_pixels_desire(const cJSON * payload, const void *ctx, const char *sco
       client[0] = 0;
       desired_count = 0;
     }
-  xSemaphoreGive(mutex);
+    xSemaphoreGive(mutex);
     return;
   }
   const char     *b = string_value(m, "boot"), *c = string_value(m, "client");
@@ -290,7 +333,7 @@ pet_bubble_pixels_desire(const cJSON * payload, const void *ctx, const char *sco
         valid = false;
     const           cJSON *assets = cJSON_GetObjectItemCaseSensitive(v, "assets");
     int             count = cJSON_GetArraySize(assets);
-    if (!cJSON_IsArray(assets) || count < 0 || count > 4)
+    if (!cJSON_IsArray(assets) || count < 0 || count > (int) DESIRED_ASSETS_PER_OWNER)
       valid = false;
     next[i].asset_count = valid ? (unsigned)count : 0;
     for (unsigned k = 0; valid && k < next[i].asset_count; k++) {
@@ -509,12 +552,25 @@ pet_bubble_pixels_pin_page(pet_bubble_text_view_t * out, unsigned page)
     return;
   } unpin(out->body_pin);
   out->body_pin = -1;
-  int             slot = find(text_key(out->style, out->body), out->style, page);
+  char key_body[512];
+  copy_key_text(key_body, out->body, body_key_limit(out->style));
+  uint64_t key = text_key(out->style, key_body);
+  /* Missing current pages also need a lease so their eventual upload cannot
+   * be immediately displaced by unrelated prefetch. Never update a newer
+   * view's lease through an older snapshot of the same owner. */
+  if (page < 16) {
+    for (unsigned i = 0; i < VIEW_SLOTS; i++) {
+      text_view_t *v = &views[i];
+      if (v->occupied && v->owner == out->owner_key && v->target == out->target_key)
+        v->body_page = (uint8_t)page;
+    }
+  }
+  int             slot = find(key, out->style, page);
   if (slot >= 0) {
     out->body_pin = slot;
     cache[slot].readers++;
   } else if (out->body[0])
-    missing(text_key(out->style, out->body), out->style, page);
+    missing(key, out->style, page, key_body);
   out->pixels = (!out->title[0] || out->title_pin >= 0) && (!out->body[0] || out->body_pin >= 0);
   xSemaphoreGive(mutex);
 }
@@ -527,13 +583,16 @@ pet_bubble_pixels_select(const char *owner, unsigned style, const char *title, c
   out->title_pin = out->body_pin = -1;
   out->style = style;
   snprintf(out->title, sizeof(out->title), "%s", title ? title : "");
-  snprintf(out->body, sizeof(out->body), "%s", body ? body : "");
+  copy_key_text(out->body, body, sizeof(out->body) - 1);
+  char key_title[192], key_body[512];
+  copy_key_text(key_title, title, style == PET_BUBBLE_BODY ? 63 : 191);
+  copy_key_text(key_body, body, body_key_limit(style));
   if (!mutex)
     return;
   xSemaphoreTake(mutex, portMAX_DELAY);
   cache_now_ms = now;
   out->epoch = lifecycle_epoch;
-  uint64_t        tk = text_key(1, out->title), bk = text_key(style, out->body), id = text_key(style, owner ? owner : "");
+  uint64_t        tk = text_key(1, key_title), bk = text_key(style, key_body), id = text_key(style, owner ? owner : "");
   text_view_t    *v = NULL, *victim = &views[0];
   for (unsigned i = 0; i < VIEW_SLOTS; i++) {
     if (views[i].occupied && views[i].owner == id) {
@@ -552,17 +611,20 @@ pet_bubble_pixels_select(const char *owner, unsigned style, const char *title, c
   if (v->target != target) {
     v->target = target;
     v->since_ms = now;
+    v->body_page = 0;
   }
   v->seen_ms = now;
   v->title_key = tk;
   v->body_key = bk;
   v->style = style;
   out->since_ms = v->since_ms;
+  out->owner_key = id;
+  out->target_key = target;
   int             a = find(tk, 1, 0), b = find(bk, style, 0);
   if (out->title[0] && a < 0)
-    missing(tk, 1, 0);
+    missing(tk, 1, 0, key_title);
   if (out->body[0] && b < 0)
-    missing(bk, style, 0);
+    missing(bk, style, 0, key_body);
   if (out->title[0] && a >= 0) {
     out->title_pin = a;
     cache[a].readers++;
@@ -577,7 +639,9 @@ unsigned        pet_bubble_pixels_pages(unsigned style, const char *text){
   if (!mutex || !text || !*text)
     return 0;
   xSemaphoreTake(mutex, portMAX_DELAY);
-  uint64_t        key = text_key(style, text);
+  char key_body[512];
+  copy_key_text(key_body, text, body_key_limit(style));
+  uint64_t        key = text_key(style, key_body);
   unsigned        pages = 0;
   for (int i = 0; i < CACHE_SLOTS; i++)
     if (cache[i].data && !cache[i].retired && cache[i].key == key && cache[i].style == style) {
@@ -587,14 +651,21 @@ unsigned        pet_bubble_pixels_pages(unsigned style, const char *text){
   xSemaphoreGive(mutex);
   return pages;
 }
-static uint16_t blend(uint16_t background, uint16_t color, unsigned alpha){
-  if (alpha == 15)
-    return color;
-  unsigned        inverse = 15 - alpha;
-  unsigned        r = (((color >> 11) & 31) * alpha + ((background >> 11) & 31) * inverse + 7) / 15;
-  unsigned        g = (((color >> 5) & 63) * alpha + ((background >> 5) & 63) * inverse + 7) / 15;
-  unsigned        b = ((color & 31) * alpha + (background & 31) * inverse + 7) / 15;
-  return (uint16_t) ((r << 11) | (g << 5) | b);
+
+void pet_text_alpha_blit(const uint8_t *data, size_t size, unsigned width,
+    uint16_t *framebuffer, int x, int y, int clip_width, uint16_t color) {
+  unsigned pixel = 0;
+  for (size_t i = 0; i < size; i++) {
+    unsigned        alpha = data[i] >> 4, run = (data[i] & 15U) + 1U;
+    if (!alpha) { pixel += run; continue; }
+    for (unsigned end = pixel + run; pixel < end; pixel++) {
+      int             col = (int)(pixel % width), dx = x + col, dy = y + (int)(pixel / width);
+      if (col >= clip_width || dx < 0 || dx >= 640 || dy < 0 || dy >= 480)
+        continue;
+      uint16_t       *out = framebuffer + dy * 640 + dx;
+      *out = pet_text_alpha_blend565(*out, color, alpha);
+    }
+  }
 }
 
 bool
@@ -615,20 +686,9 @@ pet_bubble_pixels_draw_pinned(const pet_bubble_text_view_t * view, unsigned styl
   image->readers++;
   const uint8_t *data = image->data;
   size_t size = image->size;
-  unsigned        width = width_for(style), pixel = 0;
+  unsigned        width = width_for(style);
   xSemaphoreGive(mutex);
-  for (size_t i = 0; i < size; i++) {
-    unsigned        alpha = data[i] >> 4, run = (data[i] & 15U) + 1U;
-    for (unsigned end = pixel + run; pixel < end; pixel++) {
-      if (!alpha)
-        continue;
-      int             col = (int)(pixel % width), dx = x + col, dy = y + (int)(pixel / width);
-      if (col >= clip_width || dx < 0 || dx >= 640 || dy < 0 || dy >= 480)
-        continue;
-      uint16_t       *out = framebuffer + dy * 640 + dx;
-      *out = blend(*out, color, alpha);
-    }
-  }
+  pet_text_alpha_blit(data, size, width, framebuffer, x, y, clip_width, color);
   xSemaphoreTake(mutex, portMAX_DELAY);
   unpin(slot);
   xSemaphoreGive(mutex);

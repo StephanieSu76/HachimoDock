@@ -27,13 +27,6 @@ def _database(profile):
         path = Path(override).resolve()
     else:
         path = ROOT / '.pio/build' / profile / 'compile_commands.json'
-        if not path.is_file() and profile == V3:
-            # Existing isolated SDK tree; ambiguous environments require an
-            # explicit path, never an arbitrary newest/stale compile database.
-            candidates = sorted(ROOT.parents[2].glob(
-                '*/v3-isolated-exact-*/v3-build-tree/' + profile + '/compile_commands.json'))
-            assert len(candidates) == 1, 'set PET_P4_V3_COMPILE_COMMANDS to the existing exact SDK database'
-            path = candidates[0]
     assert path.is_file(), f'existing SDK compile database required: {path}'
     return path
 

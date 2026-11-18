@@ -156,12 +156,16 @@ def test_pins_survive_peer_retirement_and_new_content_has_text_fallback(receiver
     receiver([desire()]+send(transfer('title',style=1))+send(transfer('body'))+[select('title','body',True,hold=True),
         desire(client='c'*32),{'drawHeld':{'style':1,'ok':True,'first':0}},{'drawHeld':{'style':4,'ok':True,'first':0}},{'release':True},select('title','body',False)])
 
-def test_full_pinned_cache_declines_then_release_retires_safely(receiver):
-    commands=[]
-    for i in range(8):
-        owner=f'{i+1:016x}';commands+=[desire(owner=owner,scope=f'state/{i}',assets=[(4,str(i))])]+send(transfer(str(i),owner=owner))+[select(body=str(i),pixels=True)]
-    # Eight recent displayed pages remain pinned by display metadata; no unbounded allocation.
-    extra=transfer('overflow');receiver(commands+[desire(scope='state/overflow',assets=[(4,'overflow')])]+send(extra[:-1])+[{'payload':extra[-1],'ok':False},select(body='0',pixels=True)])
+def test_released_views_leave_old_pages_evictable(receiver):
+    commands = []
+    for i in range(30):
+        text = str(i)
+        now = i * 6000
+        commands.append(desire(assets=[(4, text)]))
+        commands.extend({**packet, 'now': now} for packet in send(transfer(text)))
+        commands.extend(select(body=text, pixels=True, now=now) for _ in range(3))
+    commands.append(select(body='0', pixels=False, now=30 * 6000))
+    receiver(commands)
 
 def test_page_assets_are_independent_lazy_and_missing_page_falls_back(receiver):
     receiver([desire()]+send(transfer('caption',style=2,page=0,pages=3))+[select(body='caption',style=2,pixels=True,hold=True),
@@ -177,9 +181,12 @@ def test_real_mutex_concurrent_draw_and_peer_retirement_keep_pins_safe(receiver)
 
 
 def test_missing_is_bounded_coalesced_and_stops_during_audio(receiver):
-    receiver([desire(),select(body='missing'),select(body='missing'),{'need':{'now':1,'ok':True,'style':4,'page':0}},
-        select(body='missing'),{'need':{'now':500,'ok':False}},{'need':{'now':1001,'ok':True,'style':4,'page':0}},
-        {'maintain':{'now':2001,'pause':True}},select(body='blocked'),{'need':{'now':3001,'ok':False}}])
+    receiver([desire(), select(body='missing'), select(body='missing'),
+        {'need': {'now': 1, 'ok': True, 'style': 4, 'page': 0}},
+        select(body='missing'), {'need': {'now': 101, 'ok': False}},
+        {'need': {'now': 1001, 'ok': True, 'style': 4, 'page': 0}},
+        {'maintain': {'now': 2001, 'pause': True}}, select(body='blocked'),
+        {'need': {'now': 3001, 'ok': False}}])
 
 
 def test_a_current_owner_cannot_stage_an_unlisted_content_asset(receiver):
@@ -208,3 +215,10 @@ def test_complete_manifest_retires_omitted_owner_across_display_scopes(receiver)
     receiver([desire(scope='state/working',assets=[(4,'a')])]+send(old[:1])+
         [desire(scope='ui/conversation',owner=owner,assets=[(4,'b')]),{'payload':old[1],'ok':False}]+
         send(new)+[select(body='b',pixels=True)])
+
+def test_device_requests_and_matches_the_same_utf8_prefix(receiver):
+    prefix = '中' * 127
+    text = prefix + '文'
+    receiver([desire(assets=[(4, prefix)]), select(body=text),
+        {'need': {'now': 1, 'ok': True, 'style': 4, 'page': 0}}]
+        + send(transfer(prefix)) + [select(body=text, pixels=True)])

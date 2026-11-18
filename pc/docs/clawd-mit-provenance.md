@@ -22,10 +22,8 @@ published in the MIT period:
 | HachimoDock path | Git blob | Audited upstream evidence |
 |---|---|---|
 | `pc/src-tauri/bridge/hooks/auto-start.js` | `d782a2912f3e559ab2848affc4b382c901bea789` | `hooks/auto-start.js`, present at `df9573a4` |
-| `pc/src-tauri/bridge/hooks/codebuddy-install.js` | `50a4e75a0044d67425f64a06fb7457bb7f994ad1` | `hooks/codebuddy-install.js`, present at `1b87fc80` |
 | `pc/src-tauri/bridge/hooks/cursor-install.js` | `63a25e971aed989392eb16231875f72ac569598e` | `hooks/cursor-install.js`, present at `0ed767a6` |
 | `pc/src-tauri/bridge/hooks/gemini-install.js` | `952b537d22db7c860341db44c7c61aa8c9b22a90` | `hooks/gemini-install.js`, present at `0ed767a6` |
-| `pc/src-tauri/bridge/hooks/server-config.js` | `aa3c722880e237a1b2b6afe10c841fc206ff0259` | `hooks/server-config.js`, present at `0ed767a6` |
 
 The full upstream MIT notice is preserved in
 [`THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md).
@@ -34,6 +32,13 @@ The full upstream MIT notice is preserved in
 
 The current bridge also contains modified descendants of the same MIT-era
 hook and Agent-monitor implementation. They include:
+
+| Modified file | MIT-era base blob | Audited upstream evidence |
+|---|---|---|
+| `pc/src-tauri/bridge/hooks/codebuddy-install.js` | `50a4e75a0044d67425f64a06fb7457bb7f994ad1` | `hooks/codebuddy-install.js`, present at `1b87fc80` |
+| `pc/src-tauri/bridge/hooks/server-config.js` | `aa3c722880e237a1b2b6afe10c841fc206ff0259` | `hooks/server-config.js`, present at `0ed767a6` |
+
+The local permission and state hooks were adapted to authenticate with the desktop bridge. The upstream attribution and MIT notice continue to apply. Other modified files include:
 
 - `pc/src-tauri/bridge/hooks/install.js`
 - `pc/src-tauri/bridge/hooks/clawd-hook.js`
@@ -63,6 +68,6 @@ The Clawd-derived layer is not documentation-only:
 
 ## 维护这些文件
 
-`npm test` 会执行 `scripts/check-clawd-provenance.mjs`，核对未修改文件的 SHA-256 与许可声明。修改或引入上游代码时，需要确认对应版本的许可并更新来源记录。
+`npm test` 会执行 `scripts/check-clawd-provenance.mjs`，核对已审查文件的 SHA-256 与许可声明。修改或引入上游代码时，需要确认对应版本的许可并更新来源记录。
 
 第三方声明须随源码及客户端分发。历史版本已授予的许可权利不受本项目后续许可变更影响。

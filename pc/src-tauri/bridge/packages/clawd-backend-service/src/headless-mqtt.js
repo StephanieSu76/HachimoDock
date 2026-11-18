@@ -9,6 +9,7 @@
  */
 
 const crypto = require("crypto");
+const { createCapability } = require("../../agent-session-bus/src/local-capability");
 const fs = require("fs");
 const http = require("http");
 const os = require("os");
@@ -1113,6 +1114,7 @@ class OpenClawGatewayBridge {
 class HookHttpServer {
   constructor(config) {
     this.config = config;
+    this.capability = config.capability || createCapability();
     this.server = null;
     this.port = null;
   }
@@ -1228,6 +1230,12 @@ class HookHttpServer {
         version: APP_VERSION,
         port: this.port,
       });
+      return;
+    }
+
+    const roles = req.url === "/state" || req.url === "/permission" ? ["hook"] : ["control"];
+    if (!this.capability.authorize(req, roles)) {
+      this.sendJson(res, 401, { ok: false, code: "CAPABILITY_REQUIRED" });
       return;
     }
 
@@ -1449,6 +1457,7 @@ function injectViaAgentBusOnce(agentBus, injectBody, options = {}) {
       headers: {
         "Content-Type": "application/json; charset=utf-8",
         Accept: "text/event-stream",
+        ...agentBus.authorizationHeaders("control"),
       },
     }, (res) => {
       const statusCode = Number.isFinite(res.statusCode) ? res.statusCode : 0;
@@ -2153,6 +2162,10 @@ function resolveConfig() {
     mimocode: {
       enabled: getEnvBool("CLAWD_ENABLE_MIMOCODE", true),
     },
+    hermes: {
+      enabled: parseCsvEnv("CLAWD_ENABLED_AGENTS", []).includes("hermes")
+        || getEnv("CLAWD_SELECTED_AGENT_ID", "") === "hermes",
+    },
     workbuddy: {
       // Selected/enabled channel is authoritative in both direct and autostart launches.
       enabled: parseCsvEnv("CLAWD_ENABLED_AGENTS", []).includes("workbuddy")
@@ -2288,7 +2301,9 @@ async function main() {
   });
   publisher.start();
 
+  const capability = createCapability();
   const server = new HookHttpServer({
+    capability,
     port: config.http.port,
     strictPort: config.http.strictPort,
     publisher,
@@ -2390,6 +2405,19 @@ async function main() {
     ? startClaudeLogMonitor({ publisher, metricsTracker, includeRaw: config.includeRaw })
     : { stop() {} };
 
+  let hermesMonitor = { stop() {} };
+  if (config.hermes.enabled) {
+    try {
+      const { startHermesMonitor } = require("../../../agents/hermes-monitor");
+      hermesMonitor = startHermesMonitor({
+        onState: (payload) => publishClawdState({ publisher, metricsTracker, includeRaw: false }, payload),
+        onUnavailable: () => log("warn", "Hermes session database unavailable"),
+      });
+    } catch {
+      log("warn", "Hermes monitor requires a Node runtime with SQLite support");
+    }
+  }
+
   let openclawStatus = null;
   let openclawBridge = null;
 
@@ -2441,6 +2469,7 @@ async function main() {
       new DshAdapter({ log: busLog }),
     ];
     agentBus = createAgentSessionBus({
+      capability,
       adapters,
       sessionStatusProvider: (agentId) => metricsTracker.sessionStatuses(agentId),
       sessionEventProvider: (agentId, options) => metricsTracker.sessionEvents(agentId, options),
@@ -2463,11 +2492,14 @@ async function main() {
     log("info", "agent-session-bus disabled", { reason: "AGENT_BUS_DISABLED=1" });
   }
 
+  capability.publish({ hookPort: server.port, busPort: agentBus?.port_() || null });
+
   let shuttingDown = false;
   let parentWatchdog = { stop() {} };
   function shutdown(signal) {
     if (shuttingDown) return;
     shuttingDown = true;
+    capability.clear();
     log("info", "shutdown requested", { signal });
     parentWatchdog.stop();
     queuedHardwareInputs.stop();
@@ -2478,6 +2510,7 @@ async function main() {
     if (openclawStatus) openclawStatus.stop();
     codexMonitor.stop();
     claudeLogMonitor.stop();
+    hermesMonitor.stop();
     server.stop();
     publisher.stop();
     setTimeout(() => process.exit(0), 50).unref?.();

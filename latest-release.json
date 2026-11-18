@@ -5,11 +5,11 @@
   "firmwareVersion": "0.7.103-p4-r284",
   "releaseTag": "v0.1.237",
   "releaseUrl": "https://github.com/ai-maker-lab/HachimoDock/releases/tag/v0.1.237",
-  "sourceRef": "refs/tags/v0.1.237",
-  "sourcePublished": false,
+  "sourceRef": "refs/heads/main",
+  "sourcePublished": true,
   "sourcePublication": {
     "edition": "normal-public",
-    "note": "The public tag identifies the public source baseline, not the reproducible build-source snapshot for these binaries."
+    "note": "The main branch publishes the cleaned 0.1.237 / R284 source with publication cleanup and safety fixes. It is not a reproducible build-source snapshot for the released binaries. The v0.1.237 tag remains at publicTagTargetCommit on the original public baseline; its automatic Source code archives and the published binary assets are unchanged."
   },
   "binaryBuildCommit": "1a8d6aff339d6ab15d67d03b84945ee541afd7cd",
   "publicTagTargetCommit": "0007259fc4b4b1790d5441d41fb6e583118d35f7",

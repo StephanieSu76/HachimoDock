@@ -2,7 +2,12 @@
   "schema_version": 1,
   "engine": "p4-bounded-runtime-v4",
   "host": true,
-  "vars": {},
+  "vars": {
+    "petui.wifi_data": {
+      "type": "string",
+      "init": "news.hn"
+    }
+  },
   "states": [
     "ready"
   ],
@@ -61,6 +66,7 @@
   "surface": {
     "engine": "p4-app-surface-v1",
     "graphics": "p4-app-graphics-v1",
+    "bindings": "p4-variable-bindings-v1",
     "elements": [
       {
         "type": "image",

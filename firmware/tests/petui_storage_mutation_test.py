@@ -19,6 +19,7 @@ def test_optin_unchanged_commit_preserves_all_original_mutation_cases_and_live_s
 def _mutation_source(unchanged):
     code = (ROOT / 'main/pet_p4_miniapp.c').read_text()
     install = code[code.index('bool pet_p4_miniapp_install_commit('):code.index('static bool commit_builtin_package(')]
+    install = 'typedef bool (*widget_commit_live_fn)(void *);\n' + function(code, 'install_commit_fenced') + function(code, 'pet_p4_miniapp_install_commit')
     remove = function(code, 'remove_component')
     source = r'''
 #include <assert.h>
@@ -28,10 +29,13 @@ def _mutation_source(unchanged):
 #include <stdlib.h>
 #include <string.h>
 #include "cJSON.h"
+#include "pet_p4_component_metadata.h"
+
 #include "pet_p4_storage_lane.h"
 #define PET_P4_MINIAPP_CATALOG_MAX 32
 #define PET_P4_MINIAPP_WIDGET_ID_MAX 48
 #define MINIAPP_DELETE_TARGETS 18
+#define PET_CENTER_TITLE_MASK_MAX 256
 #define PET_FILE_CLEANUP_MAX_TARGETS 24
 #define ESP_LOGI(...) ((void)0)
 #define ESP_LOGW(...) ((void)0)
@@ -44,10 +48,10 @@ static int fail_io;
 static uintptr_t task=1;
 #define miniapp_runtime_lock() do{assert(held&&!critical);critical=1;}while(0)
 #define miniapp_runtime_unlock() do{assert(critical);critical=0;}while(0)
-typedef struct {uint8_t count;} sprites_t;
-typedef struct {bool active,repair_resources;char widget_id[48],transfer_id[64],widget_json[512],buttons_json[512];size_t widget_len,buttons_len;sprites_t sprites;} staging_t;
-typedef struct {char widget_id[48],title[64];uint8_t slot,package_generation;uint32_t widget_checksum,buttons_checksum,sprites_checksum;uint8_t resource_state;} miniapp_catalog_item_t;
-typedef struct {bool active,slicing;char widget_id[48];struct{char title[64];}view;unsigned state_count,var_count,transition_count,tick_count;int counter;} miniapp_runtime_t;
+typedef struct {uint8_t count;size_t data_length,wasm_size;uint8_t pixels[1024];} sprites_t;
+typedef struct {bool active,repair_resources;char widget_id[48],transfer_id[64],widget_json[512],buttons_json[512];size_t widget_len,buttons_len,wasm_len,center_title_len;uint8_t wasm_bytes[64],center_title[256];sprites_t sprites;pet_p4_component_metadata_t package_metadata;} staging_t;
+typedef struct {char widget_id[48],title[64];uint8_t slot,package_generation;uint32_t widget_checksum,buttons_checksum,sprites_checksum,center_title_checksum;uint8_t resource_state,center_category;pet_p4_component_metadata_t package_metadata;} miniapp_catalog_item_t;
+typedef struct {bool active,slicing;char widget_id[48];struct{char title[64];}view;unsigned state_count,var_count,transition_count,tick_count,center_category;int counter,button_count;struct {char action[48];}buttons[16];} miniapp_runtime_t;
 typedef struct {uint8_t generation;uint32_t sequence;} miniapp_catalog_commit_t;
 typedef struct {char path[48];} pet_file_cleanup_target_t;
 typedef struct {uint32_t sequence;} pet_file_cleanup_plan_t;
@@ -57,7 +61,8 @@ static miniapp_catalog_item_t g_catalog[32];
 static size_t g_catalog_count,g_catalog_selected;
 static uint32_t g_catalog_sequence,g_image_revision;
 static int g_catalog_file_generation;
-static bool g_catalog_recovery_blocked,g_builtin_sync_in_progress,g_catalog_seed_pending;
+static bool g_catalog_recovery_blocked,g_builtin_sync_in_progress,g_catalog_seed_pending,g_lan_bundle_owned;
+static void reap_lan_bundle(void) {}
 static char g_storage_failure[128],g_image_id[16];
 static size_t g_image_used;static uint32_t g_image_next;
 static pet_storage_lane_t g_storage_lane;
@@ -68,6 +73,22 @@ static void lock(void *ctx){(void)ctx;assert(!held&&!critical);held=1;locks++;}
 static void storage_scope_finish(pet_storage_scope_t *scope){if(scope->active)assert(pet_storage_scope_finish(scope));}
 static bool storage_scope_begin(pet_storage_scope_t *scope,bool activation_job){(void)activation_job;return pet_storage_scope_begin(&g_storage_lane,scope);}
 static bool storage_work_current(void){return work_current;}
+typedef struct {uint32_t center_title_checksum;uint8_t center_title_slot,center_title_generation;} pet_p4_miniapp_catalog_entry_t;
+static bool fail_wasm;
+static bool pet_p4_wasm_validate_install(const char *id,const uint8_t *bytes,size_t len,bool radio,char *error,size_t size){
+ assert(!held && !critical && g_storage_lane.occupied && id[0] && bytes && len && !radio);
+ if (fail_wasm) snprintf(error,size,"WASM validation rejected");
+ return !fail_wasm;
+}
+static bool pet_center_title_mask_valid(const uint8_t *data,size_t len){(void)data;return len>0;}
+static void center_title_scratch_free(uint8_t **p){free(*p);}
+static size_t pet_p4_miniapp_center_read_title(const pet_p4_miniapp_catalog_entry_t *entry,uint8_t *out,size_t n){
+ (void)entry;(void)out;(void)n;return 0;
+}
+static bool io(void);
+static bool write_center_title(unsigned slot,uint8_t generation,const uint8_t *data,size_t len){
+ (void)slot;(void)generation;assert(data&&len);return io();
+}
 static void catalog_scratch_free(miniapp_catalog_item_t **p){free(*p);}
 static bool storage_audio_busy(void){return audio;}
 static bool pet_p4_audio_active(void){return audio;}
@@ -121,7 +142,7 @@ static bool pet_file_cleanup_prepare(pet_file_cleanup_plan_t *plan,const char *r
 static bool pet_file_cleanup_remove_at(pet_file_cleanup_plan_t *plan,size_t index){(void)index;assert(!held&&g_storage_lane.occupied&&g_catalog_sequence==plan->sequence);cleanups++;return true;}
 #define g_storage_resource_lease 1
 static bool pet_app_store_forget_with_lease(const char *id,int lease){(void)id;assert(lease==1&&!held&&commits);forgets++;return !forget_fail;}
-''' + install + remove + r'''
+''' + function((ROOT/'main/pet_p4_wasm_trial.c').read_text(),'pet_p4_wasm_action_key') + function(code,'widget_install_stage_reset') + install + remove + r'''
 static void reset(void){
  assert(held&&!g_storage_lane.occupied);memset(g_catalog,0,sizeof(g_catalog));memset(&g_runtime,0,sizeof(g_runtime));memset(&g_staging,0,sizeof(g_staging));
  g_catalog_count=2;g_catalog_selected=0;g_catalog_sequence=20;g_catalog_file_generation=0;
@@ -216,15 +237,24 @@ int main(void){
  assert(locks==unlocks);cJSON_Delete(p);return 0;
 }
 '''
+    source=source.replace(' assert(locks==unlocks);cJSON_Delete(p);return 0;',r'''
+ // A staged WASM failure stops before catalog publication or resource writes.
+ reset();fail_wasm=true;g_staging.wasm_len=1;
+ assert(pet_storage_lane_enter(&g_storage_lane));
+ assert(!pet_p4_miniapp_install_commit(p,error,sizeof(error)));
+ assert(!commits&&!io_calls&&!cleanups&&g_staging.active&&g_catalog_sequence==20);
+ assert(pet_storage_lane_leave(&g_storage_lane));fail_wasm=false;
+ assert(locks==unlocks);cJSON_Delete(p);return 0;
+''',1)
     if unchanged:
         # Keep the complete original suite, then exercise the production no-op
         # branch too. State-lane and model-lock are distinct in production;
         # physical verification takes only the latter, never the former.
         source=source.replace('assert(held&&!critical);critical=1;','assert(!critical);critical=1;')
         source=source.replace('bool active,repair_resources;','bool active,repair_resources,preserve_unchanged;')
-        source=source.replace('typedef struct {uint8_t count;} sprites_t;',r'''
+        source=source.replace('typedef struct {uint8_t count;size_t data_length,wasm_size;uint8_t pixels[1024];} sprites_t;',r'''
 typedef struct {uint8_t frame_width,frame_height,frames,fps;unsigned data_offset,data_length;} pet_p4_miniapp_sprite_t;
-typedef struct {uint8_t count;unsigned data_length;uint8_t pixels[1024];pet_p4_miniapp_sprite_t items[4];} sprites_t;
+typedef struct {uint8_t count;size_t data_length,wasm_size;uint8_t pixels[1024];pet_p4_miniapp_sprite_t items[4];} sprites_t;
 ''')
         helpers=r'''
 #define MINIAPP_SPRITE_FILE_HEADER_SIZE 8

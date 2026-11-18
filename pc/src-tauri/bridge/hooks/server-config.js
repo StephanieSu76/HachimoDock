@@ -1,3 +1,4 @@
+const { headersFor } = require("../packages/agent-session-bus/src/local-capability");
 const fs = require("fs");
 const http = require("http");
 const os = require("os");
@@ -162,6 +163,8 @@ function probePort(port, timeoutMs, callback, options = {}) {
 }
 
 function postStateToPort(port, payload, timeoutMs, callback, options = {}) {
+  let auth;
+  try { auth = headersFor("hook", port); } catch { callback(false, port); return; }
   const httpRequest = options.httpRequest || http.request;
   const req = httpRequest(
     {
@@ -172,11 +175,12 @@ function postStateToPort(port, payload, timeoutMs, callback, options = {}) {
       headers: {
         "Content-Type": "application/json",
         "Content-Length": Buffer.byteLength(payload),
+        ...auth,
       },
       timeout: timeoutMs,
     },
     (res) => {
-      if (readHeader(res, CLAWD_SERVER_HEADER) === CLAWD_SERVER_ID) {
+      if (res.statusCode >= 200 && res.statusCode < 300 && readHeader(res, CLAWD_SERVER_HEADER) === CLAWD_SERVER_ID) {
         res.resume();
         callback(true, port);
         return;
@@ -187,7 +191,7 @@ function postStateToPort(port, payload, timeoutMs, callback, options = {}) {
       res.on("data", (chunk) => {
         if (responseBody.length < 256) responseBody += chunk;
       });
-      res.on("end", () => callback(isClawdResponse(res, responseBody), port));
+      res.on("end", () => callback(res.statusCode >= 200 && res.statusCode < 300 && isClawdResponse(res, responseBody), port));
     }
   );
 

@@ -67,6 +67,7 @@ export function normalizeUsbStatusPayload(status) {
     connectionId,
     bootId,
     connected: !!status?.connected,
+    boardWedged: !!status?.boardWedged,
     portName: status?.portName || "",
     baudRate: Number(status?.baudRate) || 0,
     boardDeviceId: status?.connected ? status?.boardDeviceId || "" : "",
@@ -86,6 +87,7 @@ export function usbStatusSnapshotsEqual(left, right) {
   if (left === right) return true;
   if (!left || !right) return false;
   return left.connected === right.connected
+    && (left.boardWedged ?? false) === (right.boardWedged ?? false)
     && left.portName === right.portName
     && left.baudRate === right.baudRate
     && left.boardDeviceId === right.boardDeviceId
@@ -102,8 +104,16 @@ export function usbStatusSnapshotsEqual(left, right) {
     && JSON.stringify(left.capabilities ?? null) === JSON.stringify(right.capabilities ?? null);
 }
 
-export function deriveDeviceReachability({ usb }) {
-  const deviceOnline = Boolean(usb?.connected);
-  const onlineBoardDeviceId = deviceOnline ? String(usb?.boardDeviceId || "").trim() : "";
+export function pairedWifiTarget(status) {
+  if (status?.wifiConnected !== true || !/^p4-[0-9a-f]{12}$/.test(status.boardDeviceId || "") ||
+    !/^[0-9a-f]{16}$/.test(status.bootId || "")) return null;
+  return { boardDeviceId: status.boardDeviceId, bootId: status.bootId };
+}
+
+export function deriveDeviceReachability({ usb, wifi }) {
+  const deviceOnline = Boolean(usb?.connected || wifi);
+  const onlineBoardDeviceId = usb?.connected
+    ? String(usb.boardDeviceId || "").trim()
+    : wifi?.boardDeviceId || "";
   return { deviceOnline, onlineBoardDeviceId };
 }

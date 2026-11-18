@@ -1,7 +1,7 @@
 /**
  * [Input] open/onClose callbacks, expected board identity, and ACK-gated P4
  *         diagnostic Tauri commands.
- * [Output] Live reset/crash, memory, storage and runtime report with safe reboot
+ * [Output] Live reset/crash, memory, storage, runtime and USB WASM capabilities with safe reboot
  *          and input-binding reset actions that preserve appearance assets and
  *          await client cache rehydration from the board.
  * [Pos] component node in pc/src/dashboard
@@ -58,6 +58,7 @@ export default function DeviceDiagnosticsModal({
   onClose,
   onInputConfigReset,
   expectedBoardDeviceId,
+  wasmCapabilities,
 }) {
   const [report, setReport] = useState(null);
   const [pending, setPending] = useState(false);
@@ -131,6 +132,11 @@ export default function DeviceDiagnosticsModal({
   const runtime = report?.runtime || {};
   const touchHealth = runtime.touchHealth || {};
   const touchReady = runtime.touchReady === true ? "已就绪" : runtime.touchReady === false ? "未就绪" : "未提供状态";
+  const wasmCapability = (name) => {
+    if (!wasmCapabilities) return "未读取";
+    const value = wasmCapabilities[name];
+    return typeof value === "string" && value ? value : "设备未声明";
+  };
   const memory = report?.memory || {};
   const storage = report?.storage || {};
   const desktopBuild = report?.desktopBuild || {};
@@ -181,6 +187,17 @@ export default function DeviceDiagnosticsModal({
               <Metric label="协议 Schema（设备 / PC）" value={`${runtime.protocolSchema || "?"} / ${desktopBuild.protocolSchema || "?"}`} />
               <Metric label="启动 / 故障复位" value={`${report.bootCount || 0} / ${report.faultResetCount || 0}`} tone={report.lastResetWasFault ? "warning" : ""} />
               <Metric label="页面 / Agent" value={`${runtime.screenPage || "未知"} / ${runtime.agentState || "idle"}`} />
+              <Metric label="WASM 运行时 · widgetWasm" value={wasmCapability("widgetWasm")} />
+              <Metric label="WASM 原生画布 · widgetWasmCanvas" value={wasmCapability("widgetWasmCanvas")} />
+              <Metric label="WASM 宿主能力 · widgetWasmHost" value={wasmCapability("widgetWasmHost")} />
+              {Number.isFinite(report.wasmDroppedInputs) && (
+                <Metric label="WASM 输入丢包（本次开机）" value={report.wasmDroppedInputs}
+                  tone={report.wasmDroppedInputs ? "warning" : ""} />
+              )}
+              {report.wasmLastFailure?.componentId && (
+                <Metric label="最近组件运行错误" tone="warning"
+                  value={`${report.wasmLastFailure.componentId} · ${report.wasmLastFailure.wasmSha256?.slice(0, 12) || "未知版本"} · ${report.wasmLastFailure.error}`} />
+              )}
               <Metric label="触屏状态" value={touchReady} tone={runtime.touchReady === false ? "warning" : ""} />
               <Metric label="触控控制器 / 初始化" value={`${touchHealth.controller || "未识别"} / ${touchHealth.stage || "未知"}`} />
               <Metric label="触屏读取错误（连续 / 累计）" value={`${touchHealth.consecutiveErrors ?? "?"} / ${touchHealth.pollErrors ?? "?"}`} />

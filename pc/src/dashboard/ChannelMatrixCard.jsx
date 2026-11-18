@@ -1,6 +1,6 @@
 /**
  * [Input] useDeviceContext for appearances/agentAppearanceMap/agentOptions/currentDisplay/verified USB status/cancellable appearanceSync/refreshAppearances/applyDesktopPet/saveAgentAppearance; useToast for notices.
- * [Output] Dashboard "Agent与形象" matrix: all supported local Agent channels with unavailable client/CLI rows kept visible, detected channels offering independent appearance selection and USB-only follow switching, and non-blocking inline USB appearance-sync progress with a real abort action.
+ * [Output] Agent matrix with USB-priority follow switching, Wi-Fi follow without appearance transfer, and cancellable USB appearance sync.
  * [Pos] component node in pc/src/dashboard
  * [Sync] If this file changes, update `pc/src/dashboard/.folder.md`.
  */
@@ -90,9 +90,11 @@ export default function ChannelMatrixCard() {
     agentOptions,
     currentDisplay,
     usb,
+    wifi,
     appearanceSync,
     refreshAppearances,
     applyDesktopPet,
+    followAgent,
     cancelAppearanceSync,
     saveAgentAppearance,
   } = useDeviceContext();
@@ -110,6 +112,7 @@ export default function ChannelMatrixCard() {
 
   const visibleAgents = useMemo(() => agentOptions.filter((agent) => agent?.id), [agentOptions]);
   const activeAgentId = currentDisplay.agentId;
+  const canFollow = Boolean(usb?.connected || wifi);
 
   const appearanceForAgent = useCallback(
     (agentId) => {
@@ -225,7 +228,7 @@ export default function ChannelMatrixCard() {
     setPendingFollow(null);
     const followOnly = appearance.id === currentDisplay.appearance?.id;
     try {
-      const { notice } = await applyDesktopPet(agentId, appearance, {
+      const { notice } = await followAgent(agentId, appearance, {
         initialProgress: followOnly
           ? {
             text: "正在确认…",
@@ -253,7 +256,7 @@ export default function ChannelMatrixCard() {
         message: cancelled ? "本次未切换。" : msg,
       });
     }
-  }, [agentOptions, applyDesktopPet, currentDisplay.appearance?.id, pendingFollow, push]);
+  }, [agentOptions, followAgent, currentDisplay.appearance?.id, pendingFollow, push]);
 
   const handleCancelAppearanceSync = useCallback(async () => {
     try {
@@ -410,8 +413,8 @@ export default function ChannelMatrixCard() {
                       type="button"
                       className="btn-primary btn-sm channel-row__follow-button"
                       onClick={() => requestFollow(agent.id)}
-                      disabled={syncing || !usb?.connected}
-                      title={!usb?.connected ? "连接 USB 后才能切换跟随" : ""}
+                      disabled={syncing || !canFollow}
+                      title={!canFollow ? "用 USB 连接，或与当前设备完成 Wi-Fi 配对" : ""}
                     >
                       跟随
                     </button>
@@ -441,6 +444,7 @@ export default function ChannelMatrixCard() {
           nextLabel={channelLabelForId(agentOptions, pendingFollow.agentId)}
           appearanceName={pendingFollow.appearance?.name || "西高地小狗"}
           reusesCurrentAppearance={pendingFollow.appearance?.id === currentDisplay.appearance?.id}
+          wifiFollow={Boolean(wifi)}
           syncing={syncing}
           onCancel={() => setPendingFollow(null)}
           onConfirm={confirmFollow}
@@ -530,6 +534,7 @@ function FollowAgentConfirmModal({
   nextLabel,
   appearanceName,
   reusesCurrentAppearance,
+  wifiFollow,
   syncing,
   onCancel,
   onConfirm,
@@ -548,9 +553,9 @@ function FollowAgentConfirmModal({
         </div>
         <div className="modal-body channel-switch-confirm-modal__body">
           <div className="message-banner message-banner--muted channel-switch-confirm-modal__message">
-            {reusesCurrentAppearance
-              ? <>将设备端跟随的 Agent 从 {currentLabel || "当前 Agent"} 切换为 {nextLabel || "目标 Agent"}，继续使用「{appearanceName}」。</>
-              : <>将设备端跟随的 Agent 从 {currentLabel || "当前 Agent"} 切换为 {nextLabel || "目标 Agent"}，并同步「{appearanceName}」到设备端展示。</>}
+            将设备端跟随的 Agent 从 {currentLabel || "当前 Agent"} 切换为 {nextLabel || "目标 Agent"}。
+            {wifiFollow ? "通过 Wi-Fi 切换时，设备继续使用当前形象。"
+              : reusesCurrentAppearance ? `继续使用「${appearanceName}」。` : `同时同步「${appearanceName}」到设备。`}
           </div>
         </div>
         <div className="channel-switch-confirm-modal__actions">

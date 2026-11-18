@@ -141,7 +141,9 @@ typedef struct {
   unsigned long long touch_feedback_until_ms;
   unsigned long long done_until_ms;
   unsigned long long host_last_seen_ms;
+  unsigned long long usb_client_last_seen_ms;
   bool native_usb_mounted;
+  bool lan_client_connected;
   int local_touch_x;
   int local_touch_y;
   unsigned long long last_update_ms;
@@ -149,6 +151,9 @@ typedef struct {
 
 void pet_p4_state_init(pet_p4_runtime_state_t *state, const char *board_device_id);
 /* Trusted single-thread startup only. Repeated starts cannot replace a boot ID. */
+bool pet_p4_load_board_identity(const char *board_id);
+void pet_p4_finish_board_probe(bool wifi6);
+bool pet_p4_is_wifi6_hardware(void);
 void pet_p4_boot_identity_start(uint32_t first,uint32_t second);
 const char *pet_p4_boot_identity(void);
 bool pet_p4_protocol_asset_query_pending_configure(bool (*pending)(void *), void *context);
@@ -203,6 +208,7 @@ void pet_p4_state_set_native_usb_mounted(
   bool mounted,
   unsigned long long now_ms
 );
+bool pet_p4_state_usb_client_connected(const pet_p4_runtime_state_t *state, unsigned long long now_ms);
 bool pet_p4_state_host_connected(
   const pet_p4_runtime_state_t *state,
   unsigned long long now_ms

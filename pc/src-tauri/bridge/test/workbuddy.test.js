@@ -148,7 +148,7 @@ test("WorkBuddy hook sessions enter the bus without reading private databases or
   ] : [] });
   const port = await bus.start();
   try {
-    const data = await (await fetch(`http://127.0.0.1:${port}/agent/sessions?agentId=workbuddy`)).json();
+    const data = await (await fetch(`http://127.0.0.1:${port}/agent/sessions?agentId=workbuddy`, { headers: bus.authorizationHeaders("read") })).json();
     assert.deepEqual(data.sessions.map(s => s.id), ["session-a", "session-b"]);
     assert.equal(data.sessions[0].state, "working");
     assert.equal(data.sessions[0].name, "WorkBuddy 会话");

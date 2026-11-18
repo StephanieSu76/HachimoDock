@@ -81,6 +81,7 @@ pub(super) struct RenderBridge {
     owner_sequence: u64,
     recent: VecDeque<Desired>,
     last_need: Option<Instant>,
+    refresh_renderer: bool,
 }
 impl RenderBridge {
     // Compare-and-clear: an old WebView disposer cannot retire its successor.
@@ -88,14 +89,13 @@ impl RenderBridge {
         if !hex(instance, 32) || (sink.is_none() && self.instance != instance) {
             return false;
         }
+        self.refresh_renderer = sink.is_some() && !self.recent.is_empty();
         self.sink = sink;
         self.instance = if self.sink.is_some() {
             instance.to_owned()
         } else {
             String::new()
         };
-        self.recent.clear();
-        self.peer.clear();
         self.last_need = None;
         true
     }
@@ -103,6 +103,7 @@ impl RenderBridge {
         self.recent.clear();
         self.peer.clear();
         self.last_need = None;
+        self.refresh_renderer = false;
     }
     pub fn sink(&self) -> Option<RenderSink> {
         self.sink.clone()
@@ -123,6 +124,7 @@ impl RenderBridge {
             || p["client"] != self.instance
             || self.peer != format!("{board}:{generation}:{boot}")
             || self.sink.is_none()
+            || self.refresh_renderer
             || self
                 .last_need
                 .map(|n| n.elapsed() < Duration::from_millis(900))
@@ -137,11 +139,22 @@ impl RenderBridge {
         let mut events = Vec::new();
         for d in &self.recent {
             for (style, id) in &d.assets {
-                if p["style"] == *style && p["id"] == *id && (*style == 2 || page == 0) {
-                    events.push(json!({"topic":d.topic,"payload":d.payload,"connectionId":generation.to_string(),"boardDeviceId":board,
-              "bootId":boot,"rendererId":self.instance,"owner":d.owner,"version":d.version,"need":{"style":style,"id":id,"page":page}}));
-                    break;
+                if p["style"] != *style || p["id"] != *id || (*style != 2 && page != 0) {
+                    continue;
                 }
+                let exact_text = p["text"].as_str().filter(|text| {
+                    !text.is_empty() && text.len() <= 511 && !text.contains('\0')
+                        && p["owner"] == d.owner && p["version"] == d.version
+                        && asset(*style, text) == *id
+                });
+                let (topic, payload) = match exact_text {
+                    Some(text) => ("device/need", json!({"text":text})),
+                    None => (d.topic.as_str(), d.payload.clone()),
+                };
+                events.push(json!({"topic":topic,"payload":payload,"connectionId":generation.to_string(),
+                    "boardDeviceId":board,"bootId":boot,"rendererId":self.instance,"owner":d.owner,
+                    "version":d.version,"need":{"style":style,"id":id,"page":page}}));
+                break;
             }
         }
         if !events.is_empty() {
@@ -182,7 +195,7 @@ impl RenderBridge {
         }
         let peer = format!("{board}:{generation}:{boot}");
         if self.peer != peer {
-            self.recent.clear();
+            self.clear_peer();
             self.peer = peer;
         }
         let mut candidates = Vec::new();
@@ -325,6 +338,13 @@ impl RenderBridge {
         while self.recent.len() > 12 {
             self.recent.pop_front();
         }
+        if std::mem::take(&mut self.refresh_renderer) {
+            events.retain(|event| event["retired"] == true);
+            for d in &self.recent {
+                events.push(json!({"topic":d.topic,"payload":d.payload,"connectionId":generation.to_string(),
+                    "boardDeviceId":board,"bootId":boot,"rendererId":self.instance,"owner":d.owner,"version":d.version}));
+            }
+        }
         events
     }
 }
@@ -339,6 +359,12 @@ fn assets_for(topic: &str, p: &Value) -> Vec<(u8, String)> {
         if let Some(a) = p["sessions"].as_array() {
             for s in a {
                 add(1, text(s.get("title"), 191));
+                add(3, text(
+                    if s["content"].as_str().unwrap_or("").is_empty() { s.get("state") } else { s.get("content") },
+                    511,
+                ));
+                // The compact bubble falls back to the title when the body is empty.
+                add(3, text(s.get("title"), 511));
                 add(
                     4,
                     if s["content"].as_str().unwrap_or("").is_empty() {
@@ -365,8 +391,15 @@ fn assets_for(topic: &str, p: &Value) -> Vec<(u8, String)> {
             },
         );
         add(2, text(p.get("text"), 511));
+        add(3, text(p.get("text"), 511));
+        add(3, text(p.get("name"), 511));
+        // Status hints the device renders as the bubble body.
+        for hint in ["我在听", "想一想", "准备回答", "准备中"] {
+            add(2, hint.to_string());
+        }
     } else if topic == "audio/play_subtitle" {
         add(2, text(p.get("text"), 511));
+        add(3, text(p.get("text"), 511));
     } else {
         let title = ["displayTitle", "sessionName", "title", "agent"]
             .iter()
@@ -665,6 +698,34 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["version"], f.version);
         assert!(b.need(&p, 1, "board").is_empty());
+    }
+    #[test]
+    fn renderer_replacement_warms_only_the_current_peer_and_latest_text() {
+        let mut b = ready();
+        let boot = "1234567890abcdef";
+        let update = |value| json!({"sessionId":"a","text":value});
+        b.observe("speech/text", &update("old"), 1, "board", boot);
+        let newest = b.observe("speech/text", &update("latest"), 1, "board", boot);
+        let mut f = frame(&newest[0]);
+        f.id = asset(4, "latest");
+        let next = "b".repeat(32);
+        assert!(b.set_sink(&next, Some(Arc::new(|_| {}))));
+        let need = json!({"boot":boot,"client":next,"id":f.id,"style":4,"page":0,
+            "owner":f.owner,"version":f.version,"text":"latest"});
+        assert!(b.need(&need, 1, "board").is_empty());
+        let events = b.observe("speech/text", &update("latest"), 1, "board", boot);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["rendererId"], next);
+        assert_eq!(events[0]["payload"]["text"], "latest");
+        assert_eq!(b.need(&need, 1, "board")[0]["topic"], "device/need");
+        assert!(!b.current(&f));
+
+        assert!(b.set_sink(&"c".repeat(32), Some(Arc::new(|_| {}))));
+        let events = b.observe("speech/text", &update("after reboot"), 2, "board",
+            "ffffffffffffffff");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["payload"]["text"], "after reboot");
+        assert_eq!(events[0]["connectionId"], "2");
     }
     #[test]
     fn one_display_owner_follows_state_to_speech_without_stale_parallel_tokens() {

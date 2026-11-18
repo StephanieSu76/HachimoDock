@@ -395,3 +395,10 @@ test("video capacity refusal is explicit and cannot commit a follow switch",asyn
  await assert.rejects(f.run(),e=>e.code==='appearance-capacity-exceeded'&&e.outcome==='not_submitted'&&e.message.includes('可用空间'));
  assert.equal(f.count('usb_sync_appearance'),1);noCommit(f);
 });
+
+test("a failed slot preflight explains the wait and never commits the switch", async t => {
+ const f = fixture(t, {sync:{ok:false,error:"APPEARANCE_NOT_SUBMITTED: appearance_slot_query_busy"}});
+ await assert.rejects(f.run(), error => error.outcome === "not_submitted" && /存储操作/.test(error.message));
+ assert.equal(f.count("usb_sync_appearance"), 1);
+ noCommit(f);
+});

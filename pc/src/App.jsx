@@ -1,6 +1,6 @@
 /**
  * [Input] Consume DeviceSetup.jsx and DeviceDashboard.jsx.
- * [Output] Always-accessible desktop navigation, retryable USB setup, retained API drafts and explicitly active component observers. Accessibility consent is requested by native Agent operations, not app launch.
+ * [Output] Always-accessible desktop navigation with a keyboard configuration page, retryable USB setup, retained API drafts, paired LAN Agent sessions and explicitly active component observers. Accessibility consent is requested by native Agent operations, not app launch.
  * [Pos] component node in pc/src
  * Generation notifications distinguish reference-image rejection with retained partial results from full success.
  * [Sync] If this file changes, update this header and `pc/src/.folder.md`.
@@ -14,16 +14,21 @@ import {
   MonitorSmartphone,
   Blocks,
   KeyRound,
+  Keyboard,
+  Settings,
   Home,
 } from "lucide-react";
 import DeviceSetup from "./DeviceSetup";
 import DeviceDashboard from "./DeviceDashboard";
+import KeyboardConfiguration from "./dashboard/KeyboardConfiguration.jsx";
+import LanAgentSessionFeed from "./dashboard/LanAgentSessionFeed.jsx";
 const AppearanceGallery = lazy(() => import("./AppearanceGallery"));
 const CustomAvatarWizard = lazy(() => import("./CustomAvatarWizard"));
 const AppearanceDetail = lazy(() => import("./AppearanceDetail"));
 const ComponentCenter = lazy(() => import("./ComponentCenter"));
 import ComponentCenterBoundary from "./component-center/ComponentCenterBoundary.jsx";
 const ApiSettings = lazy(() => import("./ApiSettings"));
+const DeviceSettings = lazy(() => import("./DeviceSettings.jsx"));
 const SmartHome = lazy(() => import("./SmartHome.jsx"));
 import { DeviceContextProvider, useDeviceContext } from "./shell/DeviceContext.jsx";
 import ToastStack, { ToastProvider, useToast } from "./shell/ToastStack.jsx";
@@ -156,13 +161,10 @@ export default function App() {
     setApiReturnView("");
   }, [apiReturnView, binding]);
 
-  const isDashboard = view === "dashboard";
-  const isSetup = view === "setup";
-  const hasBinding = Boolean(binding);
   const galleryViews = new Set(["gallery", "wizard", "detail"]);
   const activeTab = view === "api"
     ? "api"
-    : view === "home" ? "home" : view === "components"
+    : view === "keyboard" ? "keyboard" : view === "settings" ? "settings" : view === "home" ? "home" : view === "components"
       ? "components"
       : galleryViews.has(view)
         ? "gallery"
@@ -196,9 +198,6 @@ export default function App() {
           binding={binding}
           apiReturnView={apiReturnView}
           activeTab={activeTab}
-          isDashboard={isDashboard}
-          isSetup={isSetup}
-          hasBinding={hasBinding}
           setView={setView}
           detailAppearanceId={detailAppearanceId}
           handleSetupComplete={handleSetupComplete}
@@ -224,9 +223,6 @@ function AppInner({
   binding,
   apiReturnView,
   activeTab,
-  isDashboard,
-  isSetup,
-  hasBinding,
   setView,
   detailAppearanceId,
   handleSetupComplete,
@@ -242,7 +238,10 @@ function AppInner({
 }) {
   const { push, dismiss } = useToast();
   const activity = useExitReasons();
-  const { refresh, usb } = useDeviceContext();
+  const { refresh, usb, wifi, selectedAgentId } = useDeviceContext();
+  const dashboardBinding = binding || (wifi ? { boardDeviceId: wifi.boardDeviceId } : null);
+  const isDashboard = Boolean(dashboardBinding) && (view === "dashboard" || (view === "setup" && !binding));
+  const isSetup = (view === "setup" && (Boolean(binding) || !wifi)) || (view === "dashboard" && !dashboardBinding);
   const lastEpochRef = useRef(0);
   const generationToastRef = useRef(null);
   const [componentsVisited, setComponentsVisited] = useState(view === "components");
@@ -305,7 +304,7 @@ function AppInner({
                 <img src={petManagerMark} alt="" />
               </span>
               <span className="sidebar-brand__copy">
-                <strong className="sidebar-brand-name">HachimiDock</strong>
+                <strong className="sidebar-brand-name">Hachimodock</strong>
                 <span>桌宠管理端 · v{clientVersion}</span>
               </span>
             </div>
@@ -314,11 +313,11 @@ function AppInner({
             <button
               type="button"
               className={`sidebar-nav__item ${activeTab === "device" ? "is-active" : ""}`}
-              onClick={() => setView(hasBinding ? "dashboard" : "setup")}
-              title="设备"
+              onClick={() => setView(dashboardBinding ? "dashboard" : "setup")}
+              title="Agent交互"
             >
               <MonitorSmartphone size={16} />
-              <span className="sidebar-nav-label">设备</span>
+              <span className="sidebar-nav-label">Agent交互</span>
             </button>
             <button
               type="button"
@@ -341,14 +340,20 @@ function AppInner({
             <button type="button" className={`sidebar-nav__item ${activeTab === "home" ? "is-active" : ""}`} onClick={() => setView("home")} title="智能家居">
               <Home size={16} /><span className="sidebar-nav-label">智能家居</span>
             </button>
+            <button type="button" className={`sidebar-nav__item ${activeTab === "keyboard" ? "is-active" : ""}`} onClick={() => setView("keyboard")} title="键盘配置">
+              <Keyboard size={16} /><span className="sidebar-nav-label">键盘配置</span>
+            </button>
             <button
               type="button"
               className={`sidebar-nav__item ${activeTab === "api" ? "is-active" : ""}`}
               onClick={handleOpenApiSettings}
-              title="设置"
+              title="模型配置"
             >
               <KeyRound size={16} />
-              <span className="sidebar-nav-label">设置</span>
+              <span className="sidebar-nav-label">模型配置</span>
+            </button>
+            <button type="button" className={`sidebar-nav__item ${activeTab === "settings" ? "is-active" : ""}`} onClick={() => setView("settings")} title="其它设置">
+              <Settings size={16} /><span className="sidebar-nav-label">其它设置</span>
             </button>
             <FirmwareUpdateNavItem usb={usb} />
           </nav>
@@ -357,7 +362,7 @@ function AppInner({
           </details>}
           <div className="sidebar-spacer" />
           <ContextRail
-            onOpenDevice={() => setView(hasBinding ? "dashboard" : "setup")}
+            onOpenDevice={() => setView(dashboardBinding ? "dashboard" : "setup")}
             onOpenAppearance={handleOpenGallery}
             onOpenComponent={handleOpenComponents}
             onStartBinding={() => setView("setup")}
@@ -373,14 +378,21 @@ function AppInner({
             <Suspense fallback={<p role="status">正在载入页面…</p>}>
             {isSetup && <>
               <p role="status">连接设备后可同步内容；也可以先浏览组件、创建形象或配置 API。</p>
+              <button type="button" className="btn-secondary" onClick={() => setView("settings")}>Wi-Fi 设备配对</button>
               <DeviceSetup onComplete={handleSetupCompleteWithRefresh} />
             </>}
-            {binding && (
+            {!dashboardBinding && hasTauriRuntime() && (
+              <LanAgentSessionFeed agentId={selectedAgentId} usbConnected={usb.connected} />
+            )}
+            {!dashboardBinding && view === "keyboard" && <KeyboardConfiguration usb={usb} />}
+            {dashboardBinding && (
               <DeviceDashboard
+                onOpenDeviceSettings={() => setView("settings")}
                 active={isDashboard}
-                binding={binding}
+                keyboardActive={view === "keyboard"}
+                binding={dashboardBinding}
                 onSwitchToSetup={() => setView("setup")}
-                onUnbind={handleUnbind}
+                onUnbind={binding && !wifi ? handleUnbind : undefined}
                 onOpenGallery={handleOpenGallery}
                 onOpenDetail={handleOpenDetail}
                 onOpenApiSettings={handleOpenApiSettings}
@@ -426,6 +438,7 @@ function AppInner({
               </div>
             )}
             {view === "home" && <SmartHome />}
+            <div hidden={view !== "settings"}><DeviceSettings usb={usb} active={view === "settings"} /></div>
             </Suspense>
           </main>
         </section>

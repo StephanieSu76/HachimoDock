@@ -21,4 +21,11 @@ FFmpeg 为独立可执行文件。可从 HachimiDock **v0.1.167** 正常公开�
 
 编译客户端不需要云服务 Key；运行语音识别或形象生成时，再在客户端配置所用服务。
 
+Windows cross NSIS 安装包还需携带 DeepSeek Harness 集成资源 `dsh-bridge/`。
+`scripts/build-windows-nsis-cross.mjs` 直接读取 `src-tauri/tauri.conf.json` 的
+逐文件映射，完整复制桥接代码、Windows ACL 辅助脚本、内置 js-yaml 及其许可，
+不复制整个集成源码目录或测试、用户配置。打包前检查全部映射源文件存在，
+复制后逐字节核对，并把所有目标文件纳入必要资源检查；缺失或不一致会阻止封包。
+以后新增 DSH 随包文件应更新 Tauri 映射，cross NSIS 会自动采用同一清单。
+
 电脑状态组件使用 `sysinfo`（锁定版本见 Cargo.lock），只启用 system/network 功能；只刷新 CPU、内存与网络计数，不枚举进程、用户名、主机名或文件。上游接口说明见 [System](https://docs.rs/sysinfo/0.39.6/sysinfo/struct.System.html) 与 [Networks](https://docs.rs/sysinfo/0.39.6/sysinfo/struct.Networks.html)。其 MIT 版权声明随 macOS / Windows 安装资源的 `licenses/sysinfo-LICENSE.txt` 一起保留。

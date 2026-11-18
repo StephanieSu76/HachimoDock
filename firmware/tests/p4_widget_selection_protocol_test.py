@@ -19,8 +19,10 @@ def test_real_selection_parser_preserves_active_and_restores_visible_id(tmp_path
 #include <stdlib.h>
 #include <string.h>
 #include "cJSON.h"
+#include "pet_p4_component_metadata.h"
 #include "pet_p4_json_source.h"
 #include "pet_p4_storage_lane.h"
+#include "pet_p4_center_layout.h"
 #define PET_P4_MINIAPP_WIDGET_ID_MAX 48
 #define PET_P4_MINIAPP_CATALOG_MAX 30
 #define PET_WIDGET_TRACE_SCOPE(name,kind) ((void)0)
@@ -35,8 +37,8 @@ static void pet_widget_trace_end(int*p,bool ok){(void)p;(void)ok;}
 typedef void (*pet_p4_send_line_fn)(const char*,void*);
 typedef struct {char board_device_id[48],screen_page[24];unsigned stats,last_update_ms;}pet_p4_runtime_state_t;
 typedef struct {char *line;}pet_p4_query_reply_t;
-typedef struct {char widget_id[48],title[64];bool active;unsigned resource_state,image_count;}pet_p4_miniapp_catalog_entry_t;
-typedef struct {char widget_id[48],title[64];unsigned resource_state,image_count;}miniapp_catalog_item_t;
+typedef struct {char widget_id[48],title[64];bool active;unsigned resource_state,image_count,center_title_checksum,center_title_slot,center_title_generation;pet_p4_component_metadata_t package_metadata;}pet_p4_miniapp_catalog_entry_t;
+typedef struct {char widget_id[48],title[64];unsigned resource_state,image_count,center_title_checksum,slot,package_generation;pet_center_filter_t center_category;pet_p4_component_metadata_t package_metadata;}miniapp_catalog_item_t;
 static miniapp_catalog_item_t g_catalog[4]={
  {.widget_id="music-player"},{.widget_id="user-z",.resource_state=1},
  {.widget_id="user-a",.resource_state=1},{.widget_id="fixture",.resource_state=1}};
@@ -54,9 +56,10 @@ static bool pet_p4_miniapp_active_id(char*out,size_t n){if(g_runtime.active)copy
 static bool forbidden(void){forbidden_calls++;assert(!"selection invoked unrelated side effect");return false;}
 static bool refused_install(const cJSON*p,char*e,size_t n){(void)p;(void)e;(void)n;return forbidden();}
 static bool refused_remove(const char*p,char*e,size_t n){(void)p;(void)e;(void)n;return forbidden();}
-#define pet_p4_miniapp_install_begin refused_install
-#define pet_p4_miniapp_install_chunk refused_install
-#define pet_p4_miniapp_install_commit refused_install
+#define pet_p4_miniapp_transfer_begin refused_install
+#define pet_p4_miniapp_transfer_chunk refused_install
+#define pet_p4_miniapp_transfer_commit refused_install
+static void pet_p4_miniapp_install_status(const cJSON *p,cJSON *r){(void)p;(void)r;forbidden();}
 #define pet_p4_miniapp_remove refused_remove
 #define pet_p4_miniapp_remove_preserving_save refused_remove
 static bool pet_p4_miniapp_resource_repair_active(void){return forbidden();}
@@ -91,10 +94,10 @@ static bool send_catalog_admin(pet_p4_runtime_state_t*s,const char*t,const cJSON
 static cJSON *response;
 static void capture(const char*line,void*ctx){(void)ctx;assert(!response);response=cJSON_ParseWithOpts(line,NULL,true);assert(response);}
 '''
-    for name in ('catalog_item_visible','catalog_entry_visible','catalog_visible_index',
+    for name in ('catalog_item_visible','catalog_entry_visible','catalog_entry_matches','catalog_filtered_index','catalog_visible_index',
                  'pet_p4_miniapp_catalog_recovery_blocked','pet_p4_miniapp_catalog_count',
                  'pet_p4_miniapp_catalog_capacity','pet_p4_miniapp_catalog_selected',
-                 'pet_p4_miniapp_catalog_get','catalog_select_id_durable',
+                 'catalog_get_filtered','pet_p4_miniapp_catalog_get','catalog_select_id_durable',
                  'pet_p4_miniapp_catalog_select_durable','pet_p4_miniapp_catalog_select'):
         code += function(miniapp,name)+'\n'
     # Preserve the actual route preflight dependency; no unconditional-true stub.

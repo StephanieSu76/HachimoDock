@@ -765,10 +765,71 @@ void tud_vendor_rx_cb(uint8_t itf, uint8_t const *buffer, uint16_t bufsize) {
   observation_changed();
 }
 
+enum { VOICE_KEY_NONE, VOICE_KEY_WIN_CTRL, VOICE_KEY_WIN_H, VOICE_KEY_MAC_CTRL_ALT_D };
+static _Atomic int g_voice_key_pending;
+static _Atomic bool g_keyboard_online;
+static uint64_t g_keyboard_release_at;
+
+static int voice_key_preset(const char *profile) {
+  if (!profile) return VOICE_KEY_NONE;
+  if (strcmp(profile, "win-ctrl") == 0) return VOICE_KEY_WIN_CTRL;
+  if (strcmp(profile, "win-h") == 0) return VOICE_KEY_WIN_H;
+  if (strcmp(profile, "mac-ctrl-alt-d") == 0) return VOICE_KEY_MAC_CTRL_ALT_D;
+  return VOICE_KEY_NONE;
+}
+
+bool pet_p4_native_voice_key_profile_valid(const char *profile) {
+  return voice_key_preset(profile) != VOICE_KEY_NONE;
+}
+
+bool pet_p4_native_voice_key_tap(const char *profile) {
+  int preset = voice_key_preset(profile);
+  int empty = VOICE_KEY_NONE;
+  return preset != VOICE_KEY_NONE
+    && atomic_load_explicit(&g_keyboard_online, memory_order_acquire)
+    && atomic_compare_exchange_strong(&g_voice_key_pending, &empty, preset);
+}
+
+static void native_keyboard_poll(void) {
+  if (!atomic_load_explicit(&g_keyboard_online, memory_order_acquire) || !tud_hid_ready()) return;
+  uint64_t now = native_now_ms();
+  if (g_keyboard_release_at) {
+    if (now >= g_keyboard_release_at && tud_hid_keyboard_report(0, 0, NULL)) g_keyboard_release_at = 0;
+    return;
+  }
+  int preset = atomic_exchange(&g_voice_key_pending, VOICE_KEY_NONE);
+  if (preset == VOICE_KEY_NONE) return;
+  uint8_t keys[6] = {0};
+  uint8_t modifiers = KEYBOARD_MODIFIER_LEFTGUI;
+  if (preset == VOICE_KEY_WIN_CTRL) modifiers |= KEYBOARD_MODIFIER_LEFTCTRL;
+  if (preset == VOICE_KEY_WIN_H) keys[0] = HID_KEY_H;
+  if (preset == VOICE_KEY_MAC_CTRL_ALT_D) {
+    modifiers = KEYBOARD_MODIFIER_LEFTCTRL | KEYBOARD_MODIFIER_LEFTALT;
+    keys[0] = HID_KEY_D;
+  }
+  if (tud_hid_keyboard_report(0, modifiers, keys)) g_keyboard_release_at = now + 45;
+}
+
+uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
+    hid_report_type_t type, uint8_t *buffer, uint16_t length) {
+  if (instance != 0 || report_id != 0 || type != HID_REPORT_TYPE_INPUT ||
+      length < sizeof(hid_keyboard_report_t)) return 0;
+  memset(buffer, 0, sizeof(hid_keyboard_report_t));
+  return sizeof(hid_keyboard_report_t);
+}
+
+void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t type,
+    uint8_t const *buffer, uint16_t length) {
+  (void)instance; (void)report_id; (void)type; (void)buffer; (void)length;
+}
+
 static void tusb_device_task(void *arg) {
   (void) arg;
   while (true) {
-    tud_task();
+    bool keyboard_waiting = g_keyboard_release_at ||
+      atomic_load_explicit(&g_keyboard_online, memory_order_acquire);
+    tud_task_ext(keyboard_waiting ? 12 : UINT32_MAX, false);
+    native_keyboard_poll();
   }
 }
 
@@ -863,12 +924,26 @@ static void native_mount_changed(int state){
   pet_p4_native_rx_frame_t wake={0};
   if(g_rx_queue)(void)xQueueSend(g_rx_queue,&wake,0);
 }
-void tud_mount_cb(void){native_mount_changed(1);}
-void tud_umount_cb(void){native_mount_changed(-1);}
+void tud_mount_cb(void) {
+  g_keyboard_release_at = 0;
+  atomic_store(&g_voice_key_pending, VOICE_KEY_NONE);
+  atomic_store(&g_keyboard_online, true);
+  native_mount_changed(1);
+}
+void tud_umount_cb(void) {
+  atomic_store(&g_keyboard_online, false);
+  atomic_store(&g_voice_key_pending, VOICE_KEY_NONE);
+  g_keyboard_release_at = 0;
+  native_mount_changed(-1);
+}
 
 void tud_suspend_cb(bool remote_wakeup_en) {
   (void) remote_wakeup_en;
+  atomic_store(&g_keyboard_online, false);
+  atomic_store(&g_voice_key_pending, VOICE_KEY_NONE);
 }
 
 void tud_resume_cb(void) {
+  atomic_store(&g_voice_key_pending, VOICE_KEY_NONE);
+  atomic_store(&g_keyboard_online, tud_mounted());
 }

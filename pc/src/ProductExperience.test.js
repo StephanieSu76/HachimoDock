@@ -70,7 +70,7 @@ test("generation result acknowledgement also removes its persistent toast", () =
 test("Agent discovery leaves the UI thread without permanently caching missing executables", () => {
   const backend = readSource("src-tauri/src/lib.rs");
   assert.match(backend, /async fn detect_local_agents\(/);
-  assert.match(backend, /spawn_blocking\(detect_local_agents_inner\)/);
+  assert.match(backend, /spawn_blocking\(move \|\| detect_local_agents_inner\(devin_cloud_enabled\)\)/);
   assert.doesNotMatch(backend, /static (?:FULL_SHELL_PATH|NPM_GLOBAL_BIN): OnceLock/);
 });
 
@@ -211,9 +211,11 @@ test("Tauri release resources are target-specific and package only audited LGPL 
   assert.match(packageJson.scripts["sign:mac:local"], /sign-macos-local-app\.mjs/);
   assert.match(packageJson.scripts["bundle:mac:local"], /bundle-macos-local-dmg\.mjs/);
   assert.match(packageJson.scripts["verify:mac:local"], /--verify-only/);
-  assert.match(localMacSigner, /designated => identifier "com\.petmanager\.desktop"/);
+  assert.match(localMacSigner, /certificate leaf = H/);
+  assert.match(localMacSigner, /anchor apple generic/);
+  assert.match(localMacSigner, /macos\?\.signingIdentity/);
   assert.match(localMacSigner, /--verify/);
-  assert.match(localMacSigner, /stable local designated requirement is missing/);
+  assert.match(localMacSigner, /Missing certificate-bound Developer ID designated requirement/);
   assert.match(localMacDmgBundler, /verifyStableApp\(appPath\)/);
   assert.match(localMacDmgBundler, /readFileSync\(tauriConfigPath, "utf8"\)/);
   assert.match(localMacDmgBundler, /PET_MANAGER_DMG_FLAVOR/);
@@ -430,8 +432,8 @@ test("coding-agent and media-tool detection uses user/environment-derived paths"
 
   for (const [label, source] of Object.entries({
     tauri,
-    ffmpeg,
-    composer,
+    ffmpeg: ffmpeg.split("fn community_npx_search_dirs")[0],
+    composer: composer.replaceAll('"/usr/bin/open"', '"system-open"'),
     codex,
     claude,
     mimocode,
@@ -487,8 +489,12 @@ test("bound dashboard keeps its controller mounted but drops visual content off-
   const app = readSource("src/App.jsx");
   const dashboard = readSource("src/DeviceDashboard.jsx");
 
-  assert.match(app, /\{binding && \(\s*<DeviceDashboard[\s\S]*active=\{isDashboard\}/);
-  assert.doesNotMatch(app, /\{isDashboard && binding && \(/);
+  assert.match(app, /\{dashboardBinding && \(\s*<DeviceDashboard[\s\S]*active=\{isDashboard\}/);
+  assert.doesNotMatch(app, /\{isDashboard && dashboardBinding && \(/);
+  assert.match(app, /title="键盘配置"[\s\S]*title="模型配置"/);
+  assert.match(app, /keyboardActive=\{view === "keyboard"\}/);
+  const settings = readSource("src/DeviceSettings.jsx");
+  assert.doesNotMatch(settings, /BluetoothShortcutPanel/);
   assert.match(dashboard, /\{active && <PageShell/);
   assert.match(dashboard, /editingPersona && <div hidden=\{!active\}><PersonaVoiceModal/);
 });

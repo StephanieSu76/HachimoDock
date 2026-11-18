@@ -5,6 +5,10 @@
 #if PET_P4_H264_PREFETCH
 static char g_h264_presented_path[80];
 static uint64_t g_h264_first_presented_ms;
+#if PET_P4_CONVERSATION_VIDEO
+static uint64_t g_h264_last_ptt_offer_us;
+#define PET_P4_PTT_VIDEO_INTERVAL_US 125000ULL
+#endif
 #if PET_P4_H264_WORKER_PACK
 /* Main/render-mutex owner only. The pin exists solely within one render call;
  * unlike QUEUED, this descriptor is never visible to the native worker. */
@@ -131,7 +135,11 @@ static bool h264_prefetch_offer(pet_p4_asset_cache_entry_t *source,const char *p
   /* This lease admits only decode of a finished, pinned PSRAM source on the
    * existing single worker. No file/cache allocation is moved into audio. */
   kind=PET_RESOURCE_CACHED_VIDEO; /* NULL-source jobs only close the codec. */
-  audio_blocked=audio_blocked&&(!pet_p4_audio_conversation_video_ready()||pet_p4_audio_music_active());
+  bool ptt=pet_p4_audio_ptt_video_ready();
+  audio_blocked=audio_blocked&&(!(pet_p4_audio_conversation_video_ready()||ptt)||pet_p4_audio_music_active());
+  if(!ptt)g_h264_last_ptt_offer_us=0;
+  if(ptt&&source&&g_h264_last_ptt_offer_us
+      &&next.enqueued_us-g_h264_last_ptt_offer_us<PET_P4_PTT_VIDEO_INTERVAL_US)return false;
 #endif
   if(!room||!g_asset_prepare_task||audio_blocked)return false;
   if(pet_resources_device_owner_open(PET_RESOURCE_MASK(kind),&next.owner)!=PET_RESOURCE_OK)return false;
@@ -156,6 +164,9 @@ static bool h264_prefetch_offer(pet_p4_asset_cache_entry_t *source,const char *p
   portENTER_CRITICAL(&g_metrics_lock);
   pet_render_counter_increment(&g_metrics.prefetch.jobs);
   portEXIT_CRITICAL(&g_metrics_lock);
+#if PET_P4_CONVERSATION_VIDEO
+  if(ptt&&source)g_h264_last_ptt_offer_us=next.enqueued_us;
+#endif
   xTaskNotifyGive(g_asset_prepare_task);return true;
 }
 

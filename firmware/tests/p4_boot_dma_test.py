@@ -10,10 +10,7 @@ def v3_idf():
         path=Path(override).expanduser().resolve()
         assert path.is_dir(), 'PET_P4_V3_IDF_PATH must name the existing exact SDK'
         return path
-    # Same deterministic isolated-SDK discovery as the real object checks.
-    candidates=sorted(ROOT.parents[2].glob('*/v3-isolated-exact-*/core/packages/framework-espidf'))
-    assert len(candidates)==1, 'set PET_P4_V3_IDF_PATH to the existing exact v3 SDK; no arbitrary SDK fallback'
-    return candidates[0]
+    pytest.fail('Set PET_P4_V3_IDF_PATH to the pinned v3 ESP-IDF SDK')
 def patcher():
     spec=importlib.util.spec_from_file_location('restart_patch',ROOT/'tools/patch_p4_restart_ahb.py');m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);return m
 

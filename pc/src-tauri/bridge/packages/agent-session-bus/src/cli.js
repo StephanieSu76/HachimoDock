@@ -46,9 +46,11 @@ async function main() {
 
   const bus = createAgentSessionBus({ adapters, log: withScope(defaultLog, "bus") });
   const port = await bus.start();
+  bus.capability.publish({ busPort: port });
   log("info", "ready", { port, adapters: adapters.map((a) => a.agentId) });
 
   const shutdown = async (signal) => {
+    bus.capability.clear();
     log("info", "shutdown requested", { signal });
     try { await bus.stop(); } catch (error) {
       log("warn", "stop threw", { error: String(error?.message || error) });

@@ -36,8 +36,10 @@ test("ChannelMatrixCard keeps supported agents visible and marks unavailable cli
   assert.match(source, /!isDetected \? \(/);
   assert.match(source, /className="channel-row__unavailable"/);
   assert.match(source, /不可用/);
-  assert.match(source, /disabled=\{syncing \|\| !usb\?\.connected\}/);
-  assert.match(source, /连接 USB 后才能切换跟随/);
+  assert.match(source, /const canFollow = Boolean\(usb\?\.connected \|\| wifi\)/);
+  assert.match(source, /disabled=\{syncing \|\| !canFollow\}/);
+  assert.match(source, /followAgent\(agentId, appearance/);
+  assert.match(source, /通过 Wi-Fi 切换时，设备继续使用当前形象/);
 
   const unavailableRule = extractCssRule(styles, ".channel-row.is-undetected");
   assert.match(unavailableRule, /border-style:\s*dashed/);
@@ -97,11 +99,12 @@ test("Opening the appearance picker is immediate while disk records refresh in t
   assert.match(source, /onClick=\{\(\)\s*=>\s+openPicker\(agent\.id\)\}/);
 });
 
-test("Follow confirmation syncs the selected agent appearance to the device", () => {
+test("Follow confirmation describes appearance handling for the active connection", () => {
   assert.match(source, /setPendingFollow\(\{ agentId, appearance \}\)/);
   assert.match(source, /function FollowAgentConfirmModal\s*\(/);
   assert.match(source, /确认跟随/);
-  assert.match(source, /同步「\{appearanceName\}」到设备端展示/);
+  assert.match(source, /同步「\$\{appearanceName\}」到设备/);
+  assert.match(source, /通过 Wi-Fi 切换时，设备继续使用当前形象/);
 });
 
 test("USB appearance sync progress stays inline and survives dashboard tab unmounts", () => {

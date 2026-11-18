@@ -1,3 +1,4 @@
+#include "pet_p4_render_cache_memory.h"
 /* Deterministic interleavings around ACTUAL native adapter. Native decoder and
  * RTOS are seams; resource broker, lifetime and production admission are real.
  * Synthetic HWM is not hardware/stack/acoustic acceptance. */
@@ -116,7 +117,7 @@ static void fresh_source(void){
  asset_cache_release(&g_asset_cache[0]);pet_p4_asset_cache_entry_t *s=&g_asset_cache[0];
  assert(pet_resources_device_owner_open(PET_RESOURCE_MASK(PET_RESOURCE_ASSET_BUFFER),&s->owner)==PET_RESOURCE_OK);
  assert(pet_resources_device_acquire(s->owner,PET_RESOURCE_ASSET_BUFFER,32,&s->buffer_lease)==PET_RESOURCE_OK);
- s->bytes=malloc(32);assert(s->bytes);memset(s->bytes,0x19,32);s->size=32;s->finished=true;s->h264=true;s->single_slice_valid=true;
+ cache_memory_begin();s->bytes=malloc(32);assert(s->bytes);cache_memory_end(32,1,UINT32_MAX);memset(s->bytes,0x19,32);s->size=32;s->finished=true;s->h264=true;s->single_slice_valid=true;
 }
 int main(void){
  g_asset_prepare_task=1;pet_p4_asset_selection_t asset={3,16,16};fresh_source();
@@ -171,7 +172,7 @@ int main(void){
  assert(!h264_prefetch_offer(&g_asset_cache[0],"occupied",16,16,true,0));
  assert(pet_resources_device_finish(io_lease)==PET_RESOURCE_FINISH_CURRENT);pet_resources_device_revoke(io);
  /* Full physical retirement and balanced broker occupancy after every branch. */
- fresh_source();asset_cache_release(&g_asset_cache[0]);pet_resource_usage_t usage;pet_resources_usage(&broker,&usage);
+ fresh_source();asset_cache_release(&g_asset_cache[0]);assert(!g_cache_memory.stream_bytes&&!g_cache_memory.stream_slots&&!g_cache_memory.mutations);pet_resource_usage_t usage;pet_resources_usage(&broker,&usage);
  assert(!usage.live_owners&&!usage.revoked_owners&&!usage.leases[PET_RESOURCE_ASSET_BUFFER]&&!usage.leases[PET_RESOURCE_ASSET_PREPARE]);
  assert(g_metrics.prefetch.min_worker_free_bytes==1234&&notifications);
  free(g_h264_work_stream);return 0;

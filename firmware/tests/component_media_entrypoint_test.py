@@ -20,12 +20,12 @@ def test_production_snapshot_captures_media_generation_before_unlock(tmp_path):
 typedef struct{bool enabled;}data_t;
 typedef struct{bool active,app_surface,instrument,slicing,media;unsigned surface_page,revision;char data_source[48];int data_page;data_t data;}view_t;
 typedef struct{bool app;unsigned count;}surface_t;
-typedef struct{view_t view;surface_t surface;int scene,art;bool surface_active,side_active,images_changed,confirmation_active;char media_source[48],confirmation_prompt[121];uint32_t image_revision,media_generation;}pet_p4_miniapp_render_snapshot_t;
+typedef struct{view_t view;surface_t surface;int scene,art;bool surface_active,side_active,images_changed,confirmation_active;char media_source[48],confirmation_prompt[121];uint32_t image_revision,media_generation,wasm_revision;}pet_p4_miniapp_render_snapshot_t;
 typedef struct{int unused;}pet_p4_miniapp_sprite_pack_t;
-static struct{view_t view;bool active,app_host,side_enabled,media;surface_t surface;int side,side_art;char media_source[48],widget_id[48];struct{uint32_t media_generation;}cext;}g_runtime;
+static struct{view_t view;bool active,app_host,side_enabled,media;surface_t surface;struct{unsigned wasm_size;}sprites;int side,side_art;char media_source[48],widget_id[48];struct{uint32_t media_generation;}cext;}g_runtime;
 static int g_render_host,depth;static uint32_t g_image_revision=17;
 static void miniapp_runtime_lock(void){assert(!depth);depth=1;}
-static void miniapp_runtime_unlock(void){assert(depth);depth=0;g_runtime.cext.media_generation=99;g_runtime.view.revision=99;}
+static void miniapp_runtime_unlock(void){assert(depth);depth=0;g_runtime.cext.media_generation=99;g_runtime.view.revision=99;g_image_revision=99;g_runtime.sprites.wasm_size=0;}
 static uint64_t esp_timer_get_time(void){return 1000000;}
 static bool confirmation_locked(char*out,uint64_t now){(void)out;(void)now;assert(depth);return false;}
 static bool runtime_host_dashboard(void*r){(void)r;return false;}
@@ -35,8 +35,8 @@ static bool surface_images_locked(pet_p4_miniapp_sprite_pack_t*s,uint32_t*r){(vo
 static void pet_p4_widget_data_view(const char*src,int page,uint64_t now,data_t*out){(void)src;(void)page;(void)now;(void)out;assert(!depth);}
 '''+function(text,'pet_p4_miniapp_render_snapshot')+r'''
 int main(void){pet_p4_miniapp_render_snapshot_t out={0};pet_p4_miniapp_sprite_pack_t images={0};uint32_t rev=0;
- g_runtime.active=true;g_runtime.view.active=true;g_runtime.view.revision=17;g_runtime.cext.media_generation=17;g_runtime.surface.app=true;
- assert(pet_p4_miniapp_render_snapshot(&out,&images,&rev));assert(out.media_generation==17&&out.view.revision==17&&out.surface_active);
+ g_runtime.active=true;g_runtime.view.active=true;g_runtime.view.revision=17;g_runtime.cext.media_generation=17;g_runtime.surface.app=true;g_runtime.sprites.wasm_size=128;
+ assert(pet_p4_miniapp_render_snapshot(&out,&images,&rev));assert(out.media_generation==17&&out.view.revision==17&&out.wasm_revision==18&&out.surface_active);
  assert(g_runtime.cext.media_generation==99&&g_runtime.view.revision==99&&!depth);
  assert(!pet_p4_miniapp_render_snapshot(NULL,&images,&rev));return 0;}
 '''
@@ -102,12 +102,13 @@ def test_real_install_delete_abort_before_catalog_and_stop_on_publish_failure(tm
     def write(path,source,*args,**kwargs):
         if path.name=='mutation.c':
             source='#define PET_P4_CAPABILITY_EXT 1\n'+source
-            source=source.replace('int counter;} miniapp_runtime_t;','int counter;int cext;} miniapp_runtime_t;')
+            source=source.replace('int counter,button_count;','int cext;int counter,button_count;')
             source=source.replace('assert(held&&!critical);critical=1;','assert(!critical);critical=1;')
-            marker='bool pet_p4_miniapp_install_commit('
+            marker='static void widget_install_stage_reset('
             at=source.index(marker)
             adapters=r'''
 typedef struct{miniapp_runtime_t *next;bool prepared;}pet_cext_publish_ticket_t;
+static void pet_cmedia_stage_reset(void) {}
 static bool media_fail_prepare,media_fail_commit;static unsigned media_prepares,media_commits,media_aborts,media_removed;static pet_cext_publish_ticket_t *pending;
 static bool pet_cmedia_stage_matches(const int*r,char*error,size_t n){(void)r;(void)error;(void)n;return true;}
 static bool pet_cmedia_persist(size_t s,uint8_t g,const int*r){(void)s;(void)g;(void)r;assert(!held);return true;}
@@ -243,7 +244,9 @@ def test_actual_render_entry_keeps_polling_and_blocks_main_decoder_on_errors(tmp
 #define ESP_LOGD(...) ((void)0)
 #define ESP_RETURN_ON_ERROR(e,tag,message) do{int err=(e);if(err)return err;}while(0)
 typedef int esp_err_t;
-typedef struct{unsigned session_queue_count;}pet_p4_runtime_state_t;
+typedef struct{unsigned session_queue_count;bool lan_client_connected;}pet_p4_runtime_state_t;
+#include "pet_p4_logical_retention.h"
+#define pet_p4_state_usb_client_connected(...) false
 typedef struct{const char *page;bool realtime_conversation,component_loading,show_voice_overlay,show_bubble,compact_bubble;}pet_p4_view_model_t;
 typedef struct{int unused;}pet_widget_trace_snapshot_t;
 static struct{uint64_t start_us,previous_end_us,gap_us,content_us,common_overlay_us,end_us;int ppa;}g_render_trace;
@@ -281,6 +284,7 @@ static bool render_asset_pet_frame(const pet_p4_runtime_state_t*s,const pet_p4_v
 #define draw_touch_feedback(...) ((void)0)
 #define draw_page_indicator(...) ((void)0)
 #define draw_connection_banner(...) ((void)0)
+#define draw_common_connection(...) ((void)0)
 #define draw_boot_diagnostic(...) ((void)0)
 #define pet_p4_state_approval_pending(...) false
 #define draw_approval_overlay(...) ((void)0)

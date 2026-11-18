@@ -7,14 +7,15 @@ enum {
 PET_BUBBLE_TITLE = 1, PET_BUBBLE_BODY = 2, PET_BUBBLE_COMPACT = 3, PET_BUBBLE_BODY_CLIPPED = 4};
 typedef struct {
   char            title[192], body[512];
-  uint64_t        since_ms;
+  uint64_t        since_ms, owner_key, target_key;
   bool            pixels;
   unsigned        style;
   uint32_t        epoch;
   int             title_pin, body_pin;
 } pet_bubble_text_view_t;
 typedef struct {
-  char            id[17], boot[17], client[33];
+  char            id[17], boot[17], client[33], owner[17], version[17];
+  char            text[512];
   unsigned        style, page;
   const void     *route;
 } pet_bubble_need_t;
@@ -30,3 +31,7 @@ void            pet_bubble_pixels_pin_page(pet_bubble_text_view_t * view, unsign
 void            pet_bubble_pixels_release(pet_bubble_text_view_t * view);
 unsigned        pet_bubble_pixels_pages(unsigned style, const char *text);
 bool            pet_bubble_pixels_draw_pinned(const pet_bubble_text_view_t * view, unsigned style, unsigned page, uint16_t * framebuffer, int x, int y, int clip_width, uint16_t color);
+
+/* Shared RLE4 coverage compositor. Callers validate the stream dimensions. */
+void pet_text_alpha_blit(const uint8_t *data, size_t size, unsigned width,
+    uint16_t *framebuffer, int x, int y, int clip_width, uint16_t color);

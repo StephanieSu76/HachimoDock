@@ -1139,7 +1139,9 @@ fn should_use_current_visible_session(
     agent_id: &str,
 ) -> bool {
     agent_uses_visible_composer(agent_id)
-        && (agent_is_frontmost || session_queue_empty || matches!(agent_id, "workbuddy" | "codex" | "deepseek-harness"))
+        && (agent_is_frontmost
+            || session_queue_empty
+            || matches!(agent_id, "workbuddy" | "devin" | "codex" | "deepseek-harness"))
 }
 
 fn voice_needs_current_composer(target: &P4SessionBinding, frontmost: bool, empty_queue: bool) -> bool {
@@ -7102,9 +7104,9 @@ fn detect_devin(cloud_enabled: bool) -> DetectedAgent {
         &[".local/bin/devin"],
         codex_composer::DEVIN_DESKTOP_EXE_NAME,
     );
-    let mut desktop_candidates = Vec::new();
     #[cfg(windows)]
-    {
+    let desktop = {
+        let mut desktop_candidates = Vec::new();
         if let Some(local) = env::var_os("LOCALAPPDATA") {
             desktop_candidates.push(
                 PathBuf::from(&local)
@@ -7125,8 +7127,10 @@ fn detect_devin(cloud_enabled: bool) -> DetectedAgent {
                     .join(codex_composer::DEVIN_DESKTOP_EXE_NAME),
             );
         }
-    }
-    let desktop = desktop_candidates.into_iter().find(|candidate| candidate.is_file());
+        desktop_candidates.into_iter().find(|candidate| candidate.is_file())
+    };
+    #[cfg(not(windows))]
+    let desktop: Option<PathBuf> = None;
     let config_found = root.is_dir();
     let detected = cloud_enabled || config_found || cli.is_some() || desktop.is_some();
     let command_path = cli
@@ -10218,7 +10222,7 @@ fn normalize_agent_id(value: &str) -> Option<String> {
         "mimo" | "mimo-code" | "mimocode" => Some("mimocode".to_string()),
         "deepseek-harness" | "deepseek" | "dsh" => Some("deepseek-harness".to_string()),
         "workbuddy" | "work-buddy" => Some("workbuddy".to_string()),
-        "devin" | "devin-desktop" => Some("devin".to_string()),
+        "devin" | "devin-desktop" | "devin desktop" => Some("devin".to_string()),
         "copilot" | "copilot-cli" => Some("copilot-cli".to_string()),
         "gemini" | "gemini-cli" => Some("gemini-cli".to_string()),
         "cursor" => Some("cursor".to_string()),
@@ -10758,7 +10762,7 @@ fn usb_source_display_name(source: &str) -> String {
         "mimo" | "mimo-code" | "mimocode" => "MiMoCode".to_string(),
         "deepseek-harness" | "deepseek" | "dsh" => "DeepSeek Harness".to_string(),
         "workbuddy" | "work-buddy" => "WorkBuddy".to_string(),
-        "devin" | "devin-desktop" => "Devin".to_string(),
+        "devin" | "devin-desktop" | "devin desktop" => "Devin".to_string(),
         other if !other.is_empty() => other.to_string(),
         _ => "桌宠".to_string(),
     }
@@ -12167,6 +12171,7 @@ fn selected_agent_to_channel_id(value: &str) -> String {
         "mimocode" => "mimocode".to_string(),
         "deepseek-harness" => "deepseek-harness".to_string(),
         "workbuddy" => "workbuddy".to_string(),
+        "devin" => "devin".to_string(),
         _ => DEFAULT_PET_CHANNEL_ID.to_string(),
     }
 }
@@ -12179,6 +12184,7 @@ fn normalize_pet_channel_id(value: String) -> String {
         "mimocode" => "mimocode".to_string(),
         "deepseek-harness" | "deepseek" | "dsh" => "deepseek-harness".to_string(),
         "workbuddy" => "workbuddy".to_string(),
+        "devin" | "devin-desktop" | "devin desktop" => "devin".to_string(),
         "cursor" => "cursor".to_string(),
         _ => DEFAULT_PET_CHANNEL_ID.to_string(),
     }

@@ -5,7 +5,9 @@
  * [Sync] If this file changes, update pc/.folder.md.
  */
 
-use serde_json::{json, Value};
+#[cfg(any(windows, target_os = "macos"))]
+use serde_json::json;
+use serde_json::Value;
 
 // Devin Desktop's Windows executable name has not been independently verified.
 pub const DEVIN_DESKTOP_EXE_NAME: &str = "devin.exe";

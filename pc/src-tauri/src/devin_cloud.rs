@@ -11,7 +11,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
-    thread::{self, JoinHandle, Thread},
+    thread::{self, Thread},
     time::Duration,
 };
 
@@ -85,7 +85,6 @@ struct DevinSession {
     status: String,
     status_detail: Option<String>,
     title: Option<String>,
-    url: Option<String>,
     user_id: Option<String>,
     is_archived: Option<bool>,
     created_at: Option<i64>,
@@ -145,13 +144,6 @@ fn read_config(path: &Path) -> Result<Option<CloudConfig>, String> {
 fn write_config(path: &Path, config: &CloudConfig) -> Result<(), String> {
     let raw = serde_json::to_vec(config).map_err(|_| "Devin 配置编码失败".to_string())?;
     crate::secure_config::write(path, CONFIG_PURPOSE, &raw)
-}
-
-pub fn enabled_with_token(app_data_dir: &Path) -> bool {
-    read_config(&config_path(app_data_dir))
-        .ok()
-        .flatten()
-        .is_some_and(|config| config.enabled && !config.token.trim().is_empty())
 }
 
 pub fn config_enabled(app_data_dir: &Path) -> bool {
@@ -389,6 +381,8 @@ fn fetch_identity(client: &Client, token: &str) -> Result<DevinIdentity, PollErr
 fn fetch_sessions(config: &CloudConfig) -> Result<Vec<DevinSession>, PollError> {
     let client = api_client()?;
     let identity = fetch_identity(&client, &config.token)?;
+    // Devin v3 SessionResponse timestamps are integer Unix seconds:
+    // https://docs.devin.ai/api-reference/v3/sessions/get-organizations-session
     let updated_after = (chrono::Utc::now().timestamp() - 24 * 60 * 60).to_string();
     let url = format!("{API_BASE}/v3/organizations/{}/sessions", config.org_id);
     let mut sessions = Vec::new();
@@ -486,10 +480,9 @@ fn session_presentation(session: &DevinSession) -> Option<SessionPresentation> {
     let state = match session.status.as_str() {
         "new" | "claimed" | "resuming" => "working",
         "running" => match session.status_detail.as_deref() {
-            Some("working") => "working",
             Some("waiting_for_user" | "waiting_for_approval") => "waiting_user",
             Some("finished") => "done",
-            _ => return None,
+            _ => "working",
         },
         "exit" => "done",
         "error" => "error",
@@ -569,7 +562,6 @@ mod tests {
             status: status.to_string(),
             status_detail: detail.map(str::to_string),
             title: title.map(str::to_string),
-            url: None,
             user_id: None,
             is_archived: None,
             created_at: None,
@@ -592,6 +584,14 @@ mod tests {
                 .state,
             "working"
         );
+        for detail in [None, Some("unrecognized")] {
+            assert_eq!(
+                session_presentation(&session("running", detail, None))
+                    .unwrap()
+                    .state,
+                "working"
+            );
+        }
         for detail in ["waiting_for_user", "waiting_for_approval"] {
             assert_eq!(
                 session_presentation(&session("running", Some(detail), None))
@@ -630,7 +630,12 @@ mod tests {
                 .state,
             "sleeping"
         );
-        assert!(session_presentation(&session("running", Some("inactivity"), None)).is_none());
+        assert_eq!(
+            session_presentation(&session("running", Some("inactivity"), None))
+                .unwrap()
+                .state,
+            "working"
+        );
     }
 
     #[test]
@@ -669,7 +674,7 @@ mod tests {
             *calls.lock().unwrap() += 1;
             Err(PollError::Unauthorized)
         });
-        assert_eq!(result, Err(PollError::Unauthorized));
+        assert!(matches!(result, Err(PollError::Unauthorized)));
         assert_eq!(*calls.lock().unwrap(), 1);
         assert_eq!(
             poll_action(&PollError::Unauthorized),

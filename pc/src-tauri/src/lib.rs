@@ -116,6 +116,7 @@ mod auth_provider;
 mod codex_composer;
 mod codex_import;
 mod component_library;
+mod devin_cloud;
 mod secure_config;
 mod desktop_window;
 mod community;
@@ -680,16 +681,19 @@ fn agent_uses_visible_composer(agent_id: &str) -> bool {
     /* DeepSeek Harness desktop voice is the OS accessibility composer adapter
      * (see integrations/dsh-hachimodock/README.md); the plugin voice endpoints
      * are a legacy ticket flow and do not register a desktop voice owner. */
-    matches!(agent_id, "codex" | "claude-code" | "workbuddy" | "deepseek-harness")
+    matches!(agent_id, "codex" | "claude-code" | "workbuddy" | "devin" | "deepseek-harness")
 }
 
 fn agent_streams_voice_draft(agent_id: &str) -> bool {
     // Rich-text desktop editors use one final insertion, preserving the same
     // draft and selection rather than pasting every ASR hypothesis.
-    agent_uses_visible_composer(agent_id) && !matches!(agent_id, "workbuddy" | "deepseek-harness")
+    agent_uses_visible_composer(agent_id) && !matches!(agent_id, "workbuddy" | "devin" | "deepseek-harness")
 }
 
 fn device_voice_platform_block_reason(agent_id: &str, is_macos: bool) -> Option<&'static str> {
+    if agent_id == "devin" && is_macos {
+        return Some("Devin 的按键语音输入仅支持 Windows Devin Desktop；macOS 暂不支持。");
+    }
     (agent_id == "mimocode" && !is_macos).then_some(
         "MiMoCode 的按键语音输入目前仅支持 macOS 终端；当前系统可使用状态跟随与设备实时对话。",
     )
@@ -698,6 +702,8 @@ fn device_voice_platform_block_reason(agent_id: &str, is_macos: bool) -> Option<
 fn visible_composer_agent_label(agent_id: &str) -> &'static str {
     if agent_id == "workbuddy" {
         "WorkBuddy"
+    } else if agent_id == "devin" {
+        "Devin"
     } else if agent_id == "deepseek-harness" {
         "DeepSeek"
     } else if agent_id == "claude-code" {
@@ -3680,13 +3686,14 @@ const BRIDGE_LAUNCH_AGENT_LABEL: &str = "com.petmanager.status-bridge";
 const BRIDGE_WINDOWS_STARTUP_SCRIPT_NAME: &str = "Pet Manager Status Bridge.cmd";
 const USB_STATE_MAX_AGE_MS: u64 = 10 * 60 * 1000;
 const USB_BRIDGE_SCAN_MAX_FILES: usize = 64;
-const KNOWN_USB_STATE_SOURCES: [&str; 6] = [
+const KNOWN_USB_STATE_SOURCES: [&str; 7] = [
     "claude-code",
     "codex",
     "openclaw",
     "mimocode",
     "deepseek-harness",
     "workbuddy",
+    "devin",
 ];
 #[cfg(windows)]
 const CREATE_NO_WINDOW_FLAG: u32 = 0x08000000;
@@ -7047,6 +7054,16 @@ fn workbuddy_config_dir(home: &Path) -> PathBuf {
         .map(|s| PathBuf::from(s.trim())).unwrap_or_else(|| home.join(".workbuddy"))
 }
 
+fn devin_config_dir(home: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(app_data) = env::var_os("APPDATA") {
+            return PathBuf::from(app_data).join("devin");
+        }
+    }
+    home.join(".config").join("devin")
+}
+
 fn detect_workbuddy() -> DetectedAgent {
     let home = get_home_dir().unwrap_or_default();
     let root = workbuddy_config_dir(&home);
@@ -7073,6 +7090,68 @@ fn detect_workbuddy() -> DetectedAgent {
         command_path: app.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
         config_path: root.join("settings.json").to_string_lossy().into_owned(),
         activity_path: String::new(), can_sync_hook: ready,
+    }
+}
+
+fn detect_devin(cloud_enabled: bool) -> DetectedAgent {
+    let home = get_home_dir().unwrap_or_default();
+    let root = devin_config_dir(&home);
+    let cli = find_agent_executable(
+        "devin",
+        Some(&home),
+        &[".local/bin/devin"],
+        codex_composer::DEVIN_DESKTOP_EXE_NAME,
+    );
+    let mut desktop_candidates = Vec::new();
+    #[cfg(windows)]
+    {
+        if let Some(local) = env::var_os("LOCALAPPDATA") {
+            desktop_candidates.push(
+                PathBuf::from(&local)
+                    .join("Programs")
+                    .join("Devin")
+                    .join(codex_composer::DEVIN_DESKTOP_EXE_NAME),
+            );
+            desktop_candidates.push(
+                PathBuf::from(local)
+                    .join("Devin")
+                    .join(codex_composer::DEVIN_DESKTOP_EXE_NAME),
+            );
+        }
+        if let Some(programs) = env::var_os("ProgramFiles") {
+            desktop_candidates.push(
+                PathBuf::from(programs)
+                    .join("Devin")
+                    .join(codex_composer::DEVIN_DESKTOP_EXE_NAME),
+            );
+        }
+    }
+    let desktop = desktop_candidates.into_iter().find(|candidate| candidate.is_file());
+    let config_found = root.is_dir();
+    let detected = cloud_enabled || config_found || cli.is_some() || desktop.is_some();
+    let command_path = cli
+        .or_else(|| desktop.map(|path| path.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    let detail = if cloud_enabled {
+        "已启用 Devin 云端会话状态同步".to_string()
+    } else if !command_path.is_empty() {
+        format!("已检测到 Devin Desktop 或 CLI: {command_path}")
+    } else if config_found {
+        format!("已检测到 Devin 配置目录: {}", root.display())
+    } else {
+        "未检测到 Devin Desktop、CLI 或已启用的云端配置".to_string()
+    };
+    DetectedAgent {
+        id: "devin".to_string(),
+        label: "Devin".to_string(),
+        detected,
+        ready: detected,
+        status: if detected { "ready" } else { "not_found" }.to_string(),
+        detail,
+        command_path,
+        config_path: root.to_string_lossy().into_owned(),
+        activity_path: String::new(),
+        can_sync_hook: false,
     }
 }
 
@@ -7268,7 +7347,7 @@ fn detect_dsh_with_home(home: Option<&Path>) -> DetectedAgent {
     }
 }
 
-fn detect_local_agents_inner() -> Result<AgentDiscoveryResponse, String> {
+fn detect_local_agents_inner(devin_cloud_enabled: bool) -> Result<AgentDiscoveryResponse, String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -7281,6 +7360,7 @@ fn detect_local_agents_inner() -> Result<AgentDiscoveryResponse, String> {
         detect_mimocode(),
         detect_dsh(),
         detect_workbuddy(),
+        detect_devin(devin_cloud_enabled),
     ];
 
     Ok(AgentDiscoveryResponse {
@@ -7290,10 +7370,59 @@ fn detect_local_agents_inner() -> Result<AgentDiscoveryResponse, String> {
 }
 
 #[tauri::command]
-async fn detect_local_agents() -> Result<AgentDiscoveryResponse, String> {
-    tauri::async_runtime::spawn_blocking(detect_local_agents_inner)
+async fn detect_local_agents(
+    app: tauri::AppHandle,
+) -> Result<AgentDiscoveryResponse, String> {
+    let devin_cloud_enabled = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .is_some_and(|path| devin_cloud::config_enabled(&path));
+    tauri::async_runtime::spawn_blocking(move || detect_local_agents_inner(devin_cloud_enabled))
         .await
         .map_err(|error| format!("Agent detection worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn devin_cloud_get_config(
+    app: tauri::AppHandle,
+) -> Result<devin_cloud::ConfigResponse, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "配置目录不可用".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || devin_cloud::get_config(&app_data_dir))
+        .await
+        .map_err(|_| "Devin 配置读取失败".to_string())?
+}
+
+#[tauri::command]
+async fn devin_cloud_save_config(
+    app: tauri::AppHandle,
+    token: Option<String>,
+    org_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "配置目录不可用".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        devin_cloud::save_config(&app_data_dir, token, org_id, enabled)
+    })
+    .await
+    .map_err(|_| "Devin 配置保存失败".to_string())?
+}
+
+#[tauri::command]
+async fn devin_cloud_test(app: tauri::AppHandle) -> Result<devin_cloud::TestResponse, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "配置目录不可用".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || devin_cloud::test_connection(&app_data_dir))
+        .await
+        .map_err(|_| "Devin 连接测试失败".to_string())
 }
 
 /// Download raw bytes from a URL on the Rust side, bypassing plugin-http's
@@ -8488,6 +8617,10 @@ const SKILL_TARGETS: &[SkillTarget] = &[
         agent: "Cursor",
         home_dir: ".cursor",
     },
+    SkillTarget {
+        agent: "Devin",
+        home_dir: "devin",
+    },
 ];
 
 const SKILL_NAME: &str = "petui";
@@ -8638,6 +8771,8 @@ async fn install_widget_skill(
     for target in SKILL_TARGETS {
         let home_subdir = if target.agent == "WorkBuddy" {
             workbuddy_config_dir(&home)
+        } else if target.agent == "Devin" {
+            devin_config_dir(&home)
         } else {
             home.join(target.home_dir)
         };
@@ -10083,6 +10218,7 @@ fn normalize_agent_id(value: &str) -> Option<String> {
         "mimo" | "mimo-code" | "mimocode" => Some("mimocode".to_string()),
         "deepseek-harness" | "deepseek" | "dsh" => Some("deepseek-harness".to_string()),
         "workbuddy" | "work-buddy" => Some("workbuddy".to_string()),
+        "devin" | "devin-desktop" => Some("devin".to_string()),
         "copilot" | "copilot-cli" => Some("copilot-cli".to_string()),
         "gemini" | "gemini-cli" => Some("gemini-cli".to_string()),
         "cursor" => Some("cursor".to_string()),
@@ -10553,7 +10689,7 @@ fn score_usb_state(state: &str) -> i32 {
         "speaking" => 40,
         "waiting_user" => 30,
         "done" => 15,
-        "idle" => 10,
+        "idle" | "sleeping" => 10,
         _ => 5,
     }
 }
@@ -10622,6 +10758,7 @@ fn usb_source_display_name(source: &str) -> String {
         "mimo" | "mimo-code" | "mimocode" => "MiMoCode".to_string(),
         "deepseek-harness" | "deepseek" | "dsh" => "DeepSeek Harness".to_string(),
         "workbuddy" | "work-buddy" => "WorkBuddy".to_string(),
+        "devin" | "devin-desktop" => "Devin".to_string(),
         other if !other.is_empty() => other.to_string(),
         _ => "桌宠".to_string(),
     }
@@ -10635,6 +10772,7 @@ fn usb_state_display_text(state: &str) -> Option<&'static str> {
         "waiting_user" => Some("等待操作"),
         "done" => Some("已完成"),
         "error" => Some("出错了"),
+        "sleeping" => Some("已暂停"),
         _ => None,
     }
 }
@@ -11518,6 +11656,9 @@ pub fn run() {
             #[cfg(debug_assertions)]
             let bundled=if bundled.is_dir(){bundled}else{PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../builtin-clawpkgs")};
             component_library::configure_bundled_host(get_home_dir().map_err(std::io::Error::other)?,bundled);
+            if let Ok(app_data_dir) = app.path().app_data_dir() {
+                devin_cloud::start_polling(&app_data_dir);
+            }
             // Optional PC-online policy must never propagate a storage/lock/host
             // failure into setup. Always manage the availability wrapper.
             let autostart=match (app.path().app_data_dir(),get_home_dir()){
@@ -11633,6 +11774,9 @@ pub fn run() {
             realtime_chat::list_voice_chat_models,
             realtime_chat::save_voice_chat_settings,
             realtime_chat::clear_voice_chat_secret,
+            devin_cloud_get_config,
+            devin_cloud_save_config,
+            devin_cloud_test,
             llm_network::load_llm_network_settings,
             llm_network::save_llm_network_settings,
             llm_network::test_llm_network_settings,
@@ -11802,6 +11946,7 @@ fn stop_background_runtimes_on_exit() {
     if STOPPED.swap(true, Ordering::SeqCst) {
         return;
     }
+    devin_cloud::stop_polling();
     pc_fetch::host::shutdown();
 
     #[cfg(windows)]
@@ -12330,7 +12475,7 @@ fn write_launch_script(
         shell_quote(&DEFAULT_BRIDGE_PORT.to_string())
     );
     let script = format!(
-        "#!/bin/sh\nset -eu\nunset NODE_OPTIONS\nmkdir -p {logs_dir}\nBRIDGE_ROOT=''\nfor candidate in {bridge_root_candidates}; do\n  if [ -f \"$candidate/{entry_relative_path}\" ]; then\n    BRIDGE_ROOT=\"$candidate\"\n    break\n  fi\ndone\nif [ -z \"$BRIDGE_ROOT\" ]; then\n  printf '%s\\n' 'bridge resources not found in any detected local path' >> {log_path}\n  exit 1\nfi\ncd \"$BRIDGE_ROOT/{workspace_relative_path}\"\nexport PATH={search_path}\nexport NODE_PATH=\"$BRIDGE_ROOT/{workspace_relative_path}/node_modules${{NODE_PATH:+:$NODE_PATH}}\"\n{codex_cli_export}{claude_cli_export}export MQTT_URL={mqtt_url}\nexport MQTT_USERNAME={mqtt_username}\nexport MQTT_PASSWORD={mqtt_password}\nexport STATUS_NAMESPACE={namespace}\nexport STATUS_DEVICE_ID={device_id}\nexport STATUS_BRIDGE_LOCAL_STATE_DIR={local_state_dir}\nexport CLAWD_BRIDGE_PORT={bridge_port}\nexport AGENT_BUS_PORT={agent_bus_port}\nexport CLAWD_ENABLED_AGENTS={enabled_agents}\nexport CLAWD_SELECTED_AGENT_ID={selected_agent_id}\nexport CLAWD_ENABLE_CLAUDE_LOG_MONITOR={claude_enabled}\nexport CLAWD_SYNC_HOOKS={claude_enabled}\nexport CLAWD_ENABLE_CODEX_MONITOR={codex_enabled}\nexport CLAWD_CODEX_SESSION_DIR={codex_session_dir}\nexport OPENCLAW_ENABLE={openclaw_enabled}\nexport CLAWD_ENABLE_MIMOCODE={mimocode_enabled}\nexec {node_path} \"$BRIDGE_ROOT/{entry_relative_path}\" >> {log_path} 2>&1\n",
+        "#!/bin/sh\nset -eu\nunset NODE_OPTIONS\nmkdir -p {logs_dir}\nBRIDGE_ROOT=''\nfor candidate in {bridge_root_candidates}; do\n  if [ -f \"$candidate/{entry_relative_path}\" ]; then\n    BRIDGE_ROOT=\"$candidate\"\n    break\n  fi\ndone\nif [ -z \"$BRIDGE_ROOT\" ]; then\n  printf '%s\\n' 'bridge resources not found in any detected local path' >> {log_path}\n  exit 1\nfi\ncd \"$BRIDGE_ROOT/{workspace_relative_path}\"\nexport PATH={search_path}\nexport NODE_PATH=\"$BRIDGE_ROOT/{workspace_relative_path}/node_modules${{NODE_PATH:+:$NODE_PATH}}\"\n{codex_cli_export}{claude_cli_export}export MQTT_URL={mqtt_url}\nexport MQTT_USERNAME={mqtt_username}\nexport MQTT_PASSWORD={mqtt_password}\nexport STATUS_NAMESPACE={namespace}\nexport STATUS_DEVICE_ID={device_id}\nexport STATUS_BRIDGE_LOCAL_STATE_DIR={local_state_dir}\nexport CLAWD_BRIDGE_PORT={bridge_port}\nexport AGENT_BUS_PORT={agent_bus_port}\nexport CLAWD_ENABLED_AGENTS={enabled_agents}\nexport CLAWD_SELECTED_AGENT_ID={selected_agent_id}\nexport CLAWD_DEVIN_CLOUD_ENABLED={devin_cloud_enabled}\nexport CLAWD_ENABLE_CLAUDE_LOG_MONITOR={claude_enabled}\nexport CLAWD_SYNC_HOOKS={claude_enabled}\nexport CLAWD_ENABLE_CODEX_MONITOR={codex_enabled}\nexport CLAWD_CODEX_SESSION_DIR={codex_session_dir}\nexport OPENCLAW_ENABLE={openclaw_enabled}\nexport CLAWD_ENABLE_MIMOCODE={mimocode_enabled}\nexec {node_path} \"$BRIDGE_ROOT/{entry_relative_path}\" >> {log_path} 2>&1\n",
         logs_dir = shell_quote(
             log_path
                 .parent()
@@ -12357,6 +12502,11 @@ fn write_launch_script(
         agent_bus_port = shell_quote(&DEFAULT_AGENT_BUS_PORT.to_string()),
         enabled_agents = shell_quote(&enabled_agents_csv(profile)),
         selected_agent_id = shell_quote(&profile.selected_agent_id),
+        devin_cloud_enabled = shell_quote(if devin_cloud::enabled_for_bridge() {
+            "true"
+        } else {
+            "false"
+        }),
         claude_enabled = shell_quote(agent_enabled_env(profile, "claude-code")),
         codex_enabled = shell_quote(agent_enabled_env(profile, "codex")),
         codex_session_dir = shell_quote(
@@ -12496,6 +12646,7 @@ $env:CLAWD_BRIDGE_STRICT_PORT = '1'\r\n\
 $env:AGENT_BUS_PORT = {agent_bus_port}\r\n\
 $env:CLAWD_ENABLED_AGENTS = {enabled_agents}\r\n\
 $env:CLAWD_SELECTED_AGENT_ID = {selected_agent_id}\r\n\
+$env:CLAWD_DEVIN_CLOUD_ENABLED = {devin_cloud_enabled}\r\n\
 $env:CLAWD_ENABLE_CLAUDE_LOG_MONITOR = {claude_enabled}\r\n\
 $env:CLAWD_SYNC_HOOKS = {claude_enabled}\r\n\
 $env:CLAWD_ENABLE_CODEX_MONITOR = {codex_enabled}\r\n\
@@ -12532,6 +12683,11 @@ Set-Content -LiteralPath {pid_path} -Value $process.Id -Encoding ascii\r\n",
         agent_bus_port = powershell_quote(&DEFAULT_AGENT_BUS_PORT.to_string()),
         enabled_agents = powershell_quote(&enabled_agents_csv(profile)),
         selected_agent_id = powershell_quote(&profile.selected_agent_id),
+        devin_cloud_enabled = powershell_quote(if devin_cloud::enabled_for_bridge() {
+            "true"
+        } else {
+            "false"
+        }),
         claude_enabled = powershell_quote(agent_enabled_env(profile, "claude-code")),
         codex_enabled = powershell_quote(agent_enabled_env(profile, "codex")),
         codex_session_dir = powershell_quote(
@@ -12821,6 +12977,14 @@ fn start_bridge_direct(
     command.env("AGENT_BUS_PORT", DEFAULT_AGENT_BUS_PORT.to_string());
     command.env("CLAWD_ENABLED_AGENTS", enabled_agents_csv(profile));
     command.env("CLAWD_SELECTED_AGENT_ID", &profile.selected_agent_id);
+    command.env(
+        "CLAWD_DEVIN_CLOUD_ENABLED",
+        if devin_cloud::enabled_for_bridge() {
+            "true"
+        } else {
+            "false"
+        },
+    );
 
     // Map enabled_agents to per-tool env vars.  Empty vec = all enabled
     // (backward compat with profiles saved before this field existed).
@@ -13705,7 +13869,8 @@ mod tests {
     fn unsupported_mimo_voice_is_rejected_before_asr_without_disabling_other_agents() {
         assert!(device_voice_platform_block_reason("mimocode", false).is_some());
         assert!(device_voice_platform_block_reason("mimocode", true).is_none());
-        for id in ["codex", "claude-code", "openclaw", "workbuddy"] {
+        assert!(device_voice_platform_block_reason("devin", true).is_some());
+        for id in ["codex", "claude-code", "openclaw", "workbuddy", "devin"] {
             assert!(device_voice_platform_block_reason(id, false).is_none());
         }
         let source = include_str!("lib.rs");
@@ -13739,6 +13904,24 @@ mod tests {
         assert_eq!(detected.id, "workbuddy");
         assert_eq!(detected.label, "WorkBuddy");
         assert!(detected.config_path.ends_with("settings.json"));
+    }
+
+    #[test]
+    fn devin_channel_uses_current_visible_composer_and_cloud_source_identity() {
+        assert_eq!(normalize_agent_id("Devin").as_deref(), Some("devin"));
+        assert_eq!(normalize_agent_id("Devin Desktop").as_deref(), Some("devin"));
+        assert_eq!(selected_agent_to_channel_id("devin"), "devin");
+        assert_eq!(normalize_pet_channel_id("Devin".into()), "devin");
+        assert_eq!(usb_source_display_name("devin"), "Devin");
+        assert_eq!(usb_state_display_text("sleeping"), Some("已暂停"));
+        assert!(KNOWN_USB_STATE_SOURCES.contains(&"devin"));
+        assert!(agent_uses_visible_composer("devin"));
+        assert!(should_use_current_visible_session(false, false, "devin"));
+        assert!(!should_locate_desktop_session(true, "devin"));
+        assert_eq!(
+            codex_composer::DEVIN_DESKTOP_EXE_NAME,
+            "devin.exe"
+        );
     }
 
     #[test]

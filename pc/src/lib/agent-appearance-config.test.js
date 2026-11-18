@@ -33,7 +33,7 @@ function installStorage(initial = {}) {
   return values;
 }
 
-test("the six fixed Agents put ChatGPT（Codex） first and use it as the first-run default", () => {
+test("the fixed Agent channels put ChatGPT（Codex） first and use it as the first-run default", () => {
   assert.equal(DEFAULT_AGENT_ID, "codex");
   assert.deepEqual(
     FIXED_AGENT_OPTIONS.map((agent) => agent.id),
@@ -44,11 +44,16 @@ test("the six fixed Agents put ChatGPT（Codex） first and use it as the first-
       "mimocode",
       "deepseek-harness",
       "workbuddy",
+      "devin",
     ],
   );
   assert.deepEqual(
     FIXED_AGENT_OPTIONS.slice(0, 2).map((agent) => agent.label),
     ["ChatGPT（Codex）", "Claude"],
+  );
+  assert.equal(
+    FIXED_AGENT_OPTIONS.find((agent) => agent.id === "devin").detail,
+    "Devin 云端会话状态与气泡；向 Devin Desktop 当前对话追加语音草稿",
   );
 });
 

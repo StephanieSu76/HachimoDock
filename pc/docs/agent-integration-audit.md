@@ -9,6 +9,7 @@
 | MiMoCode | 插件提供标题、内容与状态 | macOS 当前终端光标；Windows 尚未实现 | Windows 不支持该语音路径；检测到程序不表示可输入 |
 | OpenClaw | 网关事件 | 已有 Agent Bus 路由 | 显示可取得的会话状态，心跳不刷新气泡时间，断开连接不残留旧气泡 |
 | WorkBuddy | 独立 Hook 和会话状态 | macOS / Windows 当前可见输入框 | 追加语音草稿、确认发送及 Skill 安装；不读取私有历史数据库 |
+| Devin | 云端会话轮询与状态气泡 | Windows Devin Desktop 当前可见输入框 | 语音只追加草稿；云端状态不包含回复正文；支持安装组件 Skill |
 
 | DeepSeek Harness | 插件提供会话状态；与桌面输入通道独立 | macOS / Windows 当前可见输入框 | 无需输入配对码；需在 DeepSeek 打开目标对话；输入不可用或目标不唯一时停止 |
 
@@ -18,7 +19,7 @@
 
 录音固定本次目标。编辑器不可用、目标变化、写入或提交结果未知时，本次操作停止，不自动重放，也不改用最近历史会话。下一次新录音独立处理。界面读到的占位提示不属于用户输入。
 
-WorkBuddy 与 DeepSeek 的设备气泡选择不会切换其桌面对话；请先在应用中打开目标对话。MiMoCode Windows 的语音尚未实现，设备实时对话属于另一条能力路径。详见 [WorkBuddy](workbuddy.md)、[DSH](../../integrations/dsh-hachimodock/README.md)。
+WorkBuddy、Devin 与 DeepSeek 的设备气泡选择不会切换其桌面对话；请先在应用中打开目标对话。MiMoCode Windows 的语音尚未实现，设备实时对话属于另一条能力路径。详见 [WorkBuddy](workbuddy.md)、[Devin](devin.md)、[DSH](../../integrations/dsh-hachimodock/README.md)。
 
 ## 权限边界
 
